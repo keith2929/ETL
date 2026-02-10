@@ -13,4 +13,6 @@ Raw Excel → ETL (Python) → Clean CSV → Power BI
 
 ## How to Run
 pip install -r requirements.txt
+update config.xlsx
+update schema.xlsx if needed
 python main.py
