@@ -9,8 +9,8 @@ from collections import defaultdict
 # -----------------------------
 def load_configuration(config_file="config.xlsx"):
     """
-    Load file paths from config.xlsx
-    Returns: (file_path, output_path, schema_file, using_config)
+    Load configuration from config.xlsx
+    Returns: (file_path, output_path, schema_file, header_rows, using_config)
     """
     
     # Default paths (fallback if config doesn't exist)
@@ -18,48 +18,87 @@ def load_configuration(config_file="config.xlsx"):
     default_output_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
     default_schema_file = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\schemas.xlsx"
     
+    # Default GTO header rows (fallback)
+    default_header_rows = {
+        ("gto", "monthly_sales"): 7,
+        ("gto", "monthly_rent"): 8,
+        ("gto", "tenant_turnover"): 7
+    }
+    
     # Try to load from config file
     if os.path.exists(config_file):
         try:
             print(f"📖 Loading configuration from {config_file}")
             
-            # Try different sheet names
+            # Initialize
+            file_path = ""
+            output_path = ""
+            schema_file = ""
+            header_rows = {}
+            config_loaded = False
+            
+            # Try to load paths sheet
             try:
-                config_df = pd.read_excel(config_file, sheet_name='paths')
-            except:
-                try:
-                    config_df = pd.read_excel(config_file, sheet_name=0)  # First sheet
-                except Exception as e:
-                    print(f"❌ Error reading config file: {e}")
-                    return default_file_path, default_output_path, default_schema_file, False
+                paths_df = pd.read_excel(config_file, sheet_name='paths')
+                if 'Setting' in paths_df.columns and 'Value' in paths_df.columns:
+                    config_dict = dict(zip(paths_df['Setting'].str.strip(), paths_df['Value']))
+                    
+                    file_path = config_dict.get('raw_data', '').strip()
+                    output_path = config_dict.get('cleaned_data', '').strip()
+                    schema_file = config_dict.get('schemas', '').strip()
+                    
+                    if all([file_path, output_path, schema_file]):
+                        config_loaded = True
+                        print("✅ Successfully loaded paths from config.xlsx")
+                    else:
+                        print("⚠️ Config file exists but has empty paths, using defaults")
+                        file_path = default_file_path
+                        output_path = default_output_path
+                        schema_file = default_schema_file
+                else:
+                    print("⚠️ Config file missing required columns, using defaults")
+                    file_path = default_file_path
+                    output_path = default_output_path
+                    schema_file = default_schema_file
+            except Exception as e:
+                print(f"⚠️ Error reading 'paths' sheet: {e}, using defaults")
+                file_path = default_file_path
+                output_path = default_output_path
+                schema_file = default_schema_file
             
-            # Check required columns
-            if 'Setting' not in config_df.columns or 'Value' not in config_df.columns:
-                print("❌ Config file missing 'Setting' or 'Value' columns")
-                return default_file_path, default_output_path, default_schema_file, False
+            # Try to load GTO headers sheet
+            try:
+                headers_df = pd.read_excel(config_file, sheet_name='gto_headers')
+                if all(col in headers_df.columns for col in ['category', 'dataset', 'header_row']):
+                    header_rows = {}
+                    for _, row in headers_df.iterrows():
+                        key = (str(row['category']).strip().lower(), 
+                               str(row['dataset']).strip().lower())
+                        try:
+                            header_rows[key] = int(row['header_row'])-1
+                        except ValueError:
+                            print(f"⚠️ Invalid header_row value for {key}: {row['header_row']}")
+                    
+                    if header_rows:
+                        print(f"✅ Loaded {len(header_rows)} GTO header configurations")
+                    else:
+                        header_rows = default_header_rows
+                        print("⚠️ No valid GTO headers found, using defaults")
+                else:
+                    print("⚠️ 'gto_headers' sheet missing required columns, using defaults")
+                    header_rows = default_header_rows
+            except Exception as e:
+                print(f"⚠️ Error reading 'gto_headers' sheet: {e}, using defaults")
+                header_rows = default_header_rows
             
-            # Convert to dictionary
-            config_dict = dict(zip(config_df['Setting'].str.strip(), config_df['Value']))
+            return file_path, output_path, schema_file, header_rows, config_loaded
             
-            # Get paths
-            file_path = config_dict.get('raw_data', '').strip()
-            output_path = config_dict.get('cleaned_data', '').strip()
-            schema_file = config_dict.get('schemas', '').strip()
-            
-            # Validate paths are not empty
-            if all([file_path, output_path, schema_file]):
-                print("✅ Successfully loaded paths from config.xlsx")
-                return file_path, output_path, schema_file, True
-            else:
-                print("⚠️ Config file exists but has empty paths, using defaults")
-                return default_file_path, default_output_path, default_schema_file, False
-                
         except Exception as e:
-            print(f"❌ Error processing config file: {e}")
-            return default_file_path, default_output_path, default_schema_file, False
+            print(f"❌ Error processing config file: {e}, using all defaults")
+            return default_file_path, default_output_path, default_schema_file, default_header_rows, False
     else:
-        print(f"ℹ️ Config file '{config_file}' not found, using default paths")
-        return default_file_path, default_output_path, default_schema_file, False
+        print(f"ℹ️ Config file '{config_file}' not found, using all defaults")
+        return default_file_path, default_output_path, default_schema_file, default_header_rows, False
 
 # -----------------------------
 # Helper Functions (unchanged)
@@ -123,15 +162,6 @@ def classify_file(filename: str):
     return ("unknown", "unclassified")
 
 # -----------------------------
-# User-Defined Header Rows for GTO Files
-# -----------------------------
-HEADER_ROWS = {
-    ("gto","monthly_sales"): 7,
-    ("gto","monthly_rent"): 8,
-    ("gto","tenant_turnover"): 7
-}
-
-# -----------------------------
 # Load schemas from Excel
 # -----------------------------
 def load_schemas_from_excel(schema_file):
@@ -148,9 +178,9 @@ def load_schemas_from_excel(schema_file):
     return schemas
 
 # -----------------------------
-# Load Excel Files
+# Load Excel Files with configurable header rows
 # -----------------------------
-def load_excel_files(folder_path, default_sheet="Sheet1"):
+def load_excel_files(folder_path, header_rows_config, default_sheet="Sheet1"):
     files = glob.glob(os.path.join(folder_path, "*.xlsx"))
     data = defaultdict(lambda: defaultdict(dict))
 
@@ -158,7 +188,7 @@ def load_excel_files(folder_path, default_sheet="Sheet1"):
         workbook_name = os.path.splitext(os.path.basename(file))[0]
         try:
             category, dataset = classify_file(workbook_name)
-            header_row = HEADER_ROWS.get((category,dataset), 0)
+            header_row = header_rows_config.get((category, dataset), 0)
 
             try:
                 df = pd.read_excel(file, sheet_name=default_sheet, header=header_row)
@@ -172,7 +202,7 @@ def load_excel_files(folder_path, default_sheet="Sheet1"):
             df["year"] = year
 
             data[category][dataset][year] = df
-            print(f"✓ Loaded: {workbook_name} → {category}/{dataset}/{year}")
+            print(f"✓ Loaded: {workbook_name} → {category}/{dataset}/{year} (header row: {header_row})")
 
         except Exception as e:
             print(f"✗ Error loading {workbook_name}: {e}")
@@ -225,11 +255,11 @@ def export_to_excel(merged_data, output_folder):
 
 
 # -----------------------------
-# Main Execution with Config Support
+# Main Execution with Full Config Support
 # -----------------------------
 if __name__ == "__main__":
     # Load configuration
-    file_path, output_path, schema_file, using_config = load_configuration()
+    file_path, output_path, schema_file, header_rows_config, using_config = load_configuration()
     
     print("\n" + "="*60)
     print("ETL PROCESS STARTING")
@@ -238,15 +268,24 @@ if __name__ == "__main__":
     print(f"📁 Output path: {output_path}")
     print(f"📁 Schema file: {schema_file}")
     print(f"⚙️ Using config file: {using_config}")
+    print(f"📋 GTO header configurations: {len(header_rows_config)}")
+    for (cat, ds), hr in header_rows_config.items():
+        print(f"   - {cat}/{ds}: header row {hr}")
     print("="*60 + "\n")
     
     # Verify paths exist
     if not os.path.exists(file_path):
         print(f"❌ ERROR: Raw data folder not found at: {file_path}")
         if not using_config:
-            print("💡 Tip: Create a 'config.xlsx' file with your paths")
-            print("      The file should have columns: 'Setting' and 'Value'")
-            print("      Required settings: raw_data, cleaned_data, schemas")
+            print("\n💡 CONFIGURATION HELP:")
+            print("1. Create a 'config.xlsx' file with two sheets:")
+            print("   - Sheet 'paths' with columns: Setting, Value")
+            print("   - Sheet 'gto_headers' with columns: category, dataset, header_row")
+            print("2. Required 'paths' settings: raw_data, cleaned_data, schemas")
+            print("3. Example 'gto_headers' rows:")
+            print("   - gto, monthly_sales, 7")
+            print("   - gto, monthly_rent, 8")
+            print("   - gto, tenant_turnover, 7")
         exit(1)
         
     if not os.path.exists(schema_file):
@@ -257,8 +296,8 @@ if __name__ == "__main__":
     SCHEMAS = load_schemas_from_excel(schema_file)
     print(f"✅ Loaded {len(SCHEMAS)} schema definitions")
     
-    # Load all Excel datasets
-    data = load_excel_files(file_path)
+    # Load all Excel datasets using configurable header rows
+    data = load_excel_files(file_path, header_rows_config)
     
     merged_data = {}
     redemption_dfs = []
