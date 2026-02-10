@@ -5,7 +5,64 @@ import re
 from collections import defaultdict
 
 # -----------------------------
-# Helper Functions
+# Configuration Loader
+# -----------------------------
+def load_configuration(config_file="config.xlsx"):
+    """
+    Load file paths from config.xlsx
+    Returns: (file_path, output_path, schema_file, using_config)
+    """
+    
+    # Default paths (fallback if config doesn't exist)
+    default_file_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\raw data\raw data"
+    default_output_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
+    default_schema_file = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\schemas.xlsx"
+    
+    # Try to load from config file
+    if os.path.exists(config_file):
+        try:
+            print(f"📖 Loading configuration from {config_file}")
+            
+            # Try different sheet names
+            try:
+                config_df = pd.read_excel(config_file, sheet_name='paths')
+            except:
+                try:
+                    config_df = pd.read_excel(config_file, sheet_name=0)  # First sheet
+                except Exception as e:
+                    print(f"❌ Error reading config file: {e}")
+                    return default_file_path, default_output_path, default_schema_file, False
+            
+            # Check required columns
+            if 'Setting' not in config_df.columns or 'Value' not in config_df.columns:
+                print("❌ Config file missing 'Setting' or 'Value' columns")
+                return default_file_path, default_output_path, default_schema_file, False
+            
+            # Convert to dictionary
+            config_dict = dict(zip(config_df['Setting'].str.strip(), config_df['Value']))
+            
+            # Get paths
+            file_path = config_dict.get('raw_data', '').strip()
+            output_path = config_dict.get('cleaned_data', '').strip()
+            schema_file = config_dict.get('schemas', '').strip()
+            
+            # Validate paths are not empty
+            if all([file_path, output_path, schema_file]):
+                print("✅ Successfully loaded paths from config.xlsx")
+                return file_path, output_path, schema_file, True
+            else:
+                print("⚠️ Config file exists but has empty paths, using defaults")
+                return default_file_path, default_output_path, default_schema_file, False
+                
+        except Exception as e:
+            print(f"❌ Error processing config file: {e}")
+            return default_file_path, default_output_path, default_schema_file, False
+    else:
+        print(f"ℹ️ Config file '{config_file}' not found, using default paths")
+        return default_file_path, default_output_path, default_schema_file, False
+
+# -----------------------------
+# Helper Functions (unchanged)
 # -----------------------------
 def extract_year(filename: str):
     """Extract first 4-digit year starting with 20 from the filename"""
@@ -168,19 +225,41 @@ def export_to_excel(merged_data, output_folder):
 
 
 # -----------------------------
-# Main Execution
+# Main Execution with Config Support
 # -----------------------------
 if __name__ == "__main__":
-    file_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\raw data\raw data"
-    output_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
-    schema_file = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\schemas.xlsx"
-
+    # Load configuration
+    file_path, output_path, schema_file, using_config = load_configuration()
+    
+    print("\n" + "="*60)
+    print("ETL PROCESS STARTING")
+    print("="*60)
+    print(f"📁 Raw data path: {file_path}")
+    print(f"📁 Output path: {output_path}")
+    print(f"📁 Schema file: {schema_file}")
+    print(f"⚙️ Using config file: {using_config}")
+    print("="*60 + "\n")
+    
+    # Verify paths exist
+    if not os.path.exists(file_path):
+        print(f"❌ ERROR: Raw data folder not found at: {file_path}")
+        if not using_config:
+            print("💡 Tip: Create a 'config.xlsx' file with your paths")
+            print("      The file should have columns: 'Setting' and 'Value'")
+            print("      Required settings: raw_data, cleaned_data, schemas")
+        exit(1)
+        
+    if not os.path.exists(schema_file):
+        print(f"❌ ERROR: Schema file not found at: {schema_file}")
+        exit(1)
+    
     # Load schemas from Excel
     SCHEMAS = load_schemas_from_excel(schema_file)
-
+    print(f"✅ Loaded {len(SCHEMAS)} schema definitions")
+    
     # Load all Excel datasets
     data = load_excel_files(file_path)
-
+    
     merged_data = {}
     redemption_dfs = []
 
@@ -214,3 +293,9 @@ if __name__ == "__main__":
 
     # Export all datasets
     export_to_excel(merged_data, output_path)
+    
+    print("\n" + "="*60)
+    print(f"✅ ETL PROCESS COMPLETED SUCCESSFULLY")
+    print(f"📊 Created {len(merged_data)} cleaned datasets")
+    print(f"💾 Output saved to: {output_path}")
+    print("="*60)
