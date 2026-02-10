@@ -32,6 +32,7 @@ def detect_dayfirst(series, sample_size=10):
 def add_month_year_columns(df, date_cols=None):
     """Convert date columns to datetime and add 'month' and 'year' columns"""
     df = df.copy()
+    df.columns = df.columns.map(str)
     if date_cols is None:
         date_cols = [col for col in df.columns if 'date' in col.lower()]
     for col in date_cols:
@@ -74,121 +75,20 @@ HEADER_ROWS = {
 }
 
 # -----------------------------
-# Schema Maps (fill in for your needs)
+# Load schemas from Excel
 # -----------------------------
-SCHEMAS = {
-    ("mall","campaign"): {
-        "SrNo.": "sr_no",
-        "Receipt No": "receipt_no",
-        "Voucher Type Code": "voucher_code",
-        "Campaign Code": "voucher_code",
-        "Voucher Value": "voucher_value",
-        "Redeem Outlet Code": "outlet_code",
-        "Outlet Code": "outlet_code",
-        "Redeem Outlet Name": "outlet_name",
-        "Outlet Name": "outlet_name",
-        "Redeem Date": "transaction_date",
-        "Transact Date": "transaction_date"
-    },
-    ("mall","member"): {
-        "SrNo.":"sr_no",
-        "Trans Date":"transaction_date",
-        "Outlet Code":"outlet_code",
-        "Outlet Name":"outlet_name",
-        "Type":"transaction_type",
-        "TransactRef5":"points_earned",
-        "TransactRef6":"points_formula",
-        "Amount Spent":"amount"
-    },
-    ("brand","rewards"): {
-        "SrNo.":"sr_no",
-        "Voucher Type Code":"voucher_code",
-        "Voucher Value": "voucher_value",
-        "Redeem Outlet Code": "outlet_code",
-        "Redeem Outlet Name": "outlet_name",
-        "Redeem Date": "transaction_date",
-        "Receipt No": "receipt_no"        
-        },
-    
-    ("gto","monthly_sales"): {
-        "Unit No.":"unit_no",
-        "Contract No":"contract_no",
-        "Contract Name":"contract_name",
-        "Lease Start":"lease_start",
-        "Lease End":"lease_end",
-        "Online Sales Jan 2025":"online_sales",
-        "Offline Sales Jan 2025":"offline_sales",
-        "Estimation Jan 2025 $":"estimated_sales",
-        "Total GTO Sales Jan 2025 $":"total_GTO"
-        },
-    ("gto","monthly_rent"): {
-        "Lease Number":"lease_no",
-        "Customer Group":"customer_group",
-        "Customer":"customer",
-        "Shop Name":"shop_name",
-        "Business Entity":"business_entity",
-        "Cost center":"cost_center",
-        "Site(s)":"site",
-        "Building":"building",
-        "Level(s)":"level",
-        "Unit(s)": "unit_no",
-        "Lease Start Date":"lease_start_date",
-        "Lease Expiry Date":"lease_expiry_date",
-        "Lease Terimination Date":"lease_termination_date",
-        "Biz Commencement Date":"biz_commencement_date",
-        "Lease Status":"lease_status",
-        "Lease Type":"lease_type",
-        "Trade Type":"trade_type",
-        "Sub Trade Type": "sub_trade_type",
-        "Usage Type": "usage_type",
-        "Space Type": "space_type",
-        "Space Design Type": "space_design_type",
-        "NLA(sq ft)": "nla_sqft",
-        "GTO Reporting Month": "gto_reporting_month",
-        "GTO Period From": "gto_period_from",
-        "GTO Period To": "gto_period_to",
-        "Product Type": "product_type",
-        "GTO Amount ($)": "gto_amount",
-        "Sale GTO?": "sale_gto",
-        "GTO Rent ($)": "gto_rent",
-        "GTO Type": "gto_type",
-        "GTO Source": "gto_source",
-        "Ver. No.": "ver_no",
-        "Active Record?": "active_record",
-        "GTO Updated Date": "gto_updated_date",
-        "Reported GTO No.": "reported_gto_no",
-        "GTO Adjustment No.": "gto_adjustment_no",
-        "Lease GTO ObjectID": "lease_gto_objectid",
-        "Count": "count"
-        },
-    ("gto","tenant_turnover"): {
-        "Business Entity": "business_entity",
-        "Building": "building",
-        "Level(s)": "level",
-        "Unit(s)": "unit_no",
-        "Lease Number": "lease_no",
-        "Shop Name": "shop_name",
-        "Customer Name": "customer_name",
-        "NLA": "nla",
-        "ION Trade Type Code": "ion_trade_type_code",
-        "ION Trade Type Name": "ion_trade_type_name",
-        "JV(SG) Trade Type": "jv_sg_trade_type",
-        "JV(SG) Sub Trade": "jv_sg_sub_trade",
-        "JV(HK) Trade Type Code": "jv_hk_trade_type_code",
-        "JV(HK) Trade Type Name": "jv_hk_trade_type_name",
-        "Lease Commencement Date": "lease_commencement_date",
-        "Lease Expiry Date": "lease_expiry_date",
-        "Lease Status": "lease_status",
-        "GTO Description": "gto_description",
-        "Min GTO Rate$psf": "min_gto_rate_psf",
-        "Matrix": "matrix",
-        "Total": "total",
-        "Average": "average",
-        "Count": "count"
-    # Month columns like 2024-1, 2024-2, … are handled dynamically in your loader
-    }
-
-}
+def load_schemas_from_excel(schema_file):
+    """Load schemas from an Excel file with one sheet per dataset"""
+    xl = pd.ExcelFile(schema_file)
+    schemas = {}
+    for sheet in xl.sheet_names:
+        df = xl.parse(sheet)
+        if 'original_column' in df.columns and 'canonical_column' in df.columns:
+            mapping = dict(zip(df['original_column'], df['canonical_column']))
+            schemas[sheet] = mapping
+        else:
+            print(f"⚠️ Sheet {sheet} missing required columns 'original_column' and 'canonical_column'")
+    return schemas
 
 # -----------------------------
 # Load Excel Files
@@ -201,24 +101,19 @@ def load_excel_files(folder_path, default_sheet="Sheet1"):
         workbook_name = os.path.splitext(os.path.basename(file))[0]
         try:
             category, dataset = classify_file(workbook_name)
-            schema = SCHEMAS.get((category, dataset), {})
             header_row = HEADER_ROWS.get((category,dataset), 0)
 
-            # Read Excel
             try:
                 df = pd.read_excel(file, sheet_name=default_sheet, header=header_row)
             except:
                 xl = pd.ExcelFile(file)
                 df = xl.parse(xl.sheet_names[0], header=header_row)
 
-            # Clean blank rows/columns
             df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
 
-            # Add year column from filename
             year = extract_year(file)
             df["year"] = year
 
-            # Store
             data[category][dataset][year] = df
             print(f"✓ Loaded: {workbook_name} → {category}/{dataset}/{year}")
 
@@ -228,21 +123,27 @@ def load_excel_files(folder_path, default_sheet="Sheet1"):
     return data
 
 # -----------------------------
-# Merge Datasets
+# Merge Datasets (optimized for redemptions)
 # -----------------------------
-def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset", add_month_year=True):
+def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset", add_month_year=True, extra_columns=None):
     dfs = []
     years = sorted(dataset_dict.keys())
+
     for year in years:
         df = dataset_dict[year].copy()
         df = standardise_schema(df, schema_map)
+
+        if extra_columns:
+            for col, value in extra_columns.items():
+                df[col] = value
+
         if add_month_year:
             df = add_month_year_columns(df)
+
         dfs.append(df)
+
     merged_df = pd.concat(dfs, ignore_index=True)
-    start_year = years[0]
-    end_year = years[-1]
-    df_name = f"{dataset_base_name}_{start_year}_to_{end_year}"
+    df_name = f"{dataset_base_name}_{years[0]}_to_{years[-1]}"
     return df_name, merged_df
 
 # -----------------------------
@@ -250,29 +151,66 @@ def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset",
 # -----------------------------
 def export_to_excel(merged_data, output_folder):
     os.makedirs(output_folder, exist_ok=True)
+
+    # Delete existing Excel files in the folder
+    for file in glob.glob(os.path.join(output_folder, "*.xlsx")):
+        try:
+            os.remove(file)
+            print(f"🗑 Deleted old file: {file}")
+        except Exception as e:
+            print(f"⚠️ Could not delete {file}: {e}")
+
+    # Export new Excel files
     for name, df in merged_data.items():
         file_path = os.path.join(output_folder, f"{name}.xlsx")
         df.to_excel(file_path, index=False)
         print(f"✅ Exported {name} → {file_path}")
 
+
 # -----------------------------
-# Usage
+# Main Execution
 # -----------------------------
 if __name__ == "__main__":
-    # User just changes this path
     file_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\raw data\raw data"
     output_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
+    schema_file = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\schemas.xlsx"
 
+    # Load schemas from Excel
+    SCHEMAS = load_schemas_from_excel(schema_file)
+
+    # Load all Excel datasets
     data = load_excel_files(file_path)
 
-    # Merge all datasets
     merged_data = {}
+    redemption_dfs = []
+
     for category in data:
         for dataset in data[category]:
-            schema = SCHEMAS.get((category,dataset), {})
-            df_name, df = merge_dataset_dynamic(
-                data[category][dataset],
-                schema_map=schema,
-                dataset_base_name=f"{category}_{dataset}"
-            )
-            merged_data[df_name] = df
+            dataset_name = f"{category}_{dataset}"  # match your Excel sheet names
+            schema = SCHEMAS.get(dataset_name, {})
+
+            if (category, dataset) in [("mall", "campaign"), ("brand", "rewards")]:
+                _, df = merge_dataset_dynamic(
+                    data[category][dataset],
+                    schema_map=schema,
+                    dataset_base_name="redemptions",
+                    extra_columns={
+                        "redemption_source": dataset_name,
+                        "funding_type": category
+                    }
+                )
+                redemption_dfs.append(df)
+            else:
+                df_name, df = merge_dataset_dynamic(
+                    data[category][dataset],
+                    schema_map=schema,
+                    dataset_base_name=dataset_name
+                )
+                merged_data[df_name] = df
+
+    # Final combined redemptions fact table
+    if redemption_dfs:
+        merged_data["redemptions_all"] = pd.concat(redemption_dfs, ignore_index=True)
+
+    # Export all datasets
+    export_to_excel(merged_data, output_path)
