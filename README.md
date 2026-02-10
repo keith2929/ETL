@@ -6,8 +6,6 @@ standardises schemas, validates dates, and outputs Power BI–ready datasets.
 
 ## Tech Stack
 - Python
-- pandas
-- pandera
 - Power BI
 
 ## Workflow
