@@ -300,7 +300,7 @@ if __name__ == "__main__":
     data = load_excel_files(file_path, header_rows_config)
     
     merged_data = {}
-    redemption_dfs = []
+    campaign_dfs = []
 
     for category in data:
         for dataset in data[category]:
@@ -311,13 +311,13 @@ if __name__ == "__main__":
                 _, df = merge_dataset_dynamic(
                     data[category][dataset],
                     schema_map=schema,
-                    dataset_base_name="redemptions",
+                    dataset_base_name="campaigns",
                     extra_columns={
-                        "redemption_source": dataset_name,
-                        "funding_type": category
+                        "campaign_source": dataset_name,
+                        "campaign_type": category
                     }
                 )
-                redemption_dfs.append(df)
+                campaign_dfs.append(df)
             else:
                 df_name, df = merge_dataset_dynamic(
                     data[category][dataset],
@@ -327,8 +327,8 @@ if __name__ == "__main__":
                 merged_data[df_name] = df
 
     # Final combined redemptions fact table
-    if redemption_dfs:
-        merged_data["redemptions_all"] = pd.concat(redemption_dfs, ignore_index=True)
+    if campaign_dfs:
+        merged_data["redemptions_all"] = pd.concat(campaign_dfs, ignore_index=True)
 
     # Export all datasets
     export_to_excel(merged_data, output_path)
