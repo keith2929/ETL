@@ -34,3 +34,4 @@ class MallLoyaltyAnalyzer:
                         self.data[key][col] = pd.to_datetime(self.data[key][col], errors='coerce')
         return self.data
 
+
