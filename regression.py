@@ -17,9 +17,8 @@ class MallLoyaltyAnalyzer:
     def load_data(self):
         """Load all CSV files from the cleaned data folder"""
         files = {
-            'campaign': 'mall_campaign.csv',
-            'member': 'mall_member.csv', 
-            'rewards': 'brand_rewards.csv',
+            'campaign': 'campaign_all.csv',
+            'transactions': 'mall_member.csv', 
             'monthly_sales': 'gto_monthly_sales.csv',
             'monthly_rent': 'gto_monthly_rent.csv',
             'tenant_turnover': 'gto_tenant_turnover.csv'
@@ -34,4 +33,4 @@ class MallLoyaltyAnalyzer:
                     if 'date' in col.lower():
                         self.data[key][col] = pd.to_datetime(self.data[key][col], errors='coerce')
         return self.data
-    
+
