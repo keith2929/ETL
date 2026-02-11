@@ -154,6 +154,46 @@ def add_month_year_columns(df, date_cols=None):
     
     return df
 
+def extract_voucher_value(voucher_code):
+    """
+    Extract voucher value from voucher code based on the Power Query rules.
+    
+    Rules:
+    1. If contains "2024-", extract text after "2024-" and before "_"
+    2. EYR specific mappings:
+       - "EYR-35000" → "2500"
+       - "EYR-75000" → "5625"
+       - "EYR-100000" → "7500"
+       - "EYR-150000" → "11250"
+    3. Otherwise return empty string
+    """
+    if pd.isna(voucher_code) or not isinstance(voucher_code, str):
+        return ""
+    
+    voucher_code = str(voucher_code).strip()
+    
+    # Rule 1: Contains "2024-"
+    if "2024-" in voucher_code:
+        # Extract text after "2024-" and before "_"
+        after_2024 = voucher_code.split("2024-", 1)[1]
+        if "_" in after_2024:
+            return after_2024.split("_", 1)[0]
+        else:
+            return after_2024
+    
+    # Rule 2: EYR specific mappings
+    elif "EYR-35000" in voucher_code:
+        return "2500"
+    elif "EYR-75000" in voucher_code:
+        return "5625"
+    elif "EYR-100000" in voucher_code:
+        return "7500"
+    elif "EYR-150000" in voucher_code:
+        return "11250"
+    
+    # Rule 3: No match
+    return ""
+
 def standardise_schema(df, schema_map):
     """Rename columns according to schema and ensure all canonical columns exist"""
     df = df.copy()
