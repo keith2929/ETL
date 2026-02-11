@@ -328,7 +328,7 @@ if __name__ == "__main__":
 
     # Final combined redemptions fact table
     if campaign_dfs:
-        merged_data["redemptions_all"] = pd.concat(campaign_dfs, ignore_index=True)
+        merged_data["campaign_all"] = pd.concat(campaign_dfs, ignore_index=True)
 
     # Export all datasets
     export_to_excel(merged_data, output_path)
