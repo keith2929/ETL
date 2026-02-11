@@ -35,3 +35,4 @@ class MallLoyaltyAnalyzer:
         return self.data
 
 #
+

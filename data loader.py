@@ -126,18 +126,73 @@ def detect_dayfirst(series, sample_size=10):
     return day_first_count >= 1
 
 def add_month_year_columns(df, date_cols=None):
-    """Convert date columns to datetime and add 'month' and 'year' columns"""
+    """Convert date columns to proper date strings and add 'month' and 'year' columns"""
     df = df.copy()
     df.columns = df.columns.map(str)
+    
     if date_cols is None:
         date_cols = [col for col in df.columns if 'date' in col.lower()]
+    
     for col in date_cols:
         if col in df.columns:
+            # Detect dayfirst format for parsing
             dayfirst = detect_dayfirst(df[col])
-            df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=dayfirst)
-            df['month'] = df[col].dt.month_name().str[:3]
-            df['year'] = df[col].dt.year
+            
+            # Parse to datetime first for month/year extraction
+            parsed_dates = pd.to_datetime(df[col], errors='coerce', dayfirst=dayfirst)
+            
+            # Convert to string format 'dd/mm/yyyy'
+            df[col] = parsed_dates.apply(lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else "")
+            
+            # Add month and year columns
+            df['month'] = parsed_dates.dt.month_name().str[:3]
+            df['year'] = parsed_dates.dt.year
+            
+            # Fill NaN values in month and year with appropriate defaults
+            df['month'] = df['month'].fillna('')
+            df['year'] = df['year'].fillna('')
+    
     return df
+
+def extract_voucher_value(voucher_code):
+    """
+    Extract voucher value from voucher code based on the Power Query rules.
+    
+    Rules:
+    1. If contains "2024-", extract text after "2024-" and before "_"
+    2. EYR specific mappings:
+       - "EYR-35000" → "2500"
+       - "EYR-75000" → "5625"
+       - "EYR-100000" → "7500"
+       - "EYR-150000" → "11250"
+    3. Otherwise return empty string
+    """
+    if pd.isna(voucher_code) or not isinstance(voucher_code, str):
+        return ""
+    
+    voucher_code = str(voucher_code).strip()
+    
+    # Rule 1: Contains "2024-"
+    if "2024-" in voucher_code:
+        # Extract text after "2024-" and before "_"
+        after_2024 = voucher_code.split("2024-", 1)[1]
+        if "_" in after_2024:
+            return after_2024.split("_", 1)[0]
+        else:
+            return after_2024
+    
+    # Rule 2: EYR specific mappings
+    elif "EYR-35000" in voucher_code:
+        return "2500"
+    elif "EYR-75000" in voucher_code:
+        return "5625"
+    elif "EYR-100000" in voucher_code:
+        return "7500"
+    elif "EYR-150000" in voucher_code:
+        return "11250"
+    
+    # Rule 3: No match
+    return ""
 
 def standardise_schema(df, schema_map):
     """Rename columns according to schema and ensure all canonical columns exist"""
