@@ -3,6 +3,8 @@ import glob
 import os
 import re
 from collections import defaultdict
+from pathlib import Path
+
 
 # -----------------------------
 # Configuration Loader
@@ -12,7 +14,8 @@ def load_configuration(config_file="config.xlsx"):
     Load configuration from config.xlsx
     Returns: (file_path, output_path, schema_file, header_rows, using_config)
     """
-    
+    script_dir = Path(__file__).resolve().parent
+    config_file = str((script_dir / config_file).resolve())
     # Default paths (fallback if config doesn't exist)
     default_file_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\raw data\raw data"
     default_output_path = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
@@ -41,12 +44,18 @@ def load_configuration(config_file="config.xlsx"):
             try:
                 paths_df = pd.read_excel(config_file, sheet_name='paths')
                 if 'Setting' in paths_df.columns and 'Value' in paths_df.columns:
-                    config_dict = dict(zip(paths_df['Setting'].str.strip(), paths_df['Value']))
+                    config_dict = dict(zip(paths_df['Setting'].astype(str).str.strip(),
+                       paths_df['Value']))
                     
-                    file_path = config_dict.get('raw_data', '').strip()
-                    output_path = config_dict.get('cleaned_data', '').strip()
-                    schema_file = config_dict.get('schemas', '').strip()
+                    file_path = str(config_dict.get('raw_data', '')).strip()
+                    output_path = str(config_dict.get('cleaned_data', '')).strip()
+                    schema_file = str(config_dict.get('schemas', '')).strip()
                     
+                    print("DEBUG raw_data from config =", repr(file_path))
+                    print("DEBUG cleaned_data from config =", repr(output_path))
+                    print("DEBUG schemas from config =", repr(schema_file))
+
+
                     if all([file_path, output_path, schema_file]):
                         config_loaded = True
                         print("✅ Successfully loaded paths from config.xlsx")
@@ -295,7 +304,7 @@ def export_to_excel(merged_data, output_folder):
     os.makedirs(output_folder, exist_ok=True)
 
     # Delete existing Excel files in the folder
-    for file in glob.glob(os.path.join(output_folder, "*.xlsx")):
+    for file in glob.glob(os.path.join(output_folder, "*.xlsx")) + glob.glob(os.path.join(output_folder, "*.csv")):
         try:
             os.remove(file)
             print(f"🗑 Deleted old file: {file}")
@@ -304,9 +313,16 @@ def export_to_excel(merged_data, output_folder):
 
     # Export new Excel files
     for name, df in merged_data.items():
-        file_path = os.path.join(output_folder, f"{name}.xlsx")
-        df.to_excel(file_path, index=False)
-        print(f"✅ Exported {name} → {file_path}")
+        # Excel
+        xlsx_path = os.path.join(output_folder, f"{name}.xlsx")
+        df.to_excel(xlsx_path, index=False)
+        print(f"✅ Exported Excel {name} → {xlsx_path}")
+
+        # CSV
+        csv_path = os.path.join(output_folder, f"{name}.csv")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        print(f"✅ Exported CSV {name} → {csv_path}")
+        
 
 
 # -----------------------------
