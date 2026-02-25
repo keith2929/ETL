@@ -96,3 +96,38 @@ gto_data_selected.to_excel(output_gto_file, index=False)
 
 # Confirm the new file was saved
 print(f"✅ New file saved: {output_gto_file}")
+
+# File paths for the GTO and combined data
+gto_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/GTO.xlsx'
+combined_campaign_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/combined_campaign_transaction_gto.xlsx'
+output_combined_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/combined_campaign_transaction_with_gto.xlsx'
+
+# Load the GTO and combined campaign data
+gto_data = pd.read_excel(gto_file)
+combined_campaign = pd.read_excel(combined_campaign_file)
+
+# Normalize text: convert both 'outlet_name' and 'shop_name' to lowercase and strip any spaces
+combined_campaign['outlet_name'] = combined_campaign['outlet_name'].str.lower().str.strip()
+gto_data['shop_name'] = gto_data['shop_name'].str.lower().str.strip()
+
+# Ensure there's no duplicate data in the gto_data based on 'shop_name' and 'month_year' 
+gto_data_unique = gto_data.drop_duplicates(subset=['shop_name', 'month_year'])
+
+# Merge GTO data with the combined campaign data based on 'shop_name' and 'month_year'
+merged_data = pd.merge(combined_campaign, gto_data_unique[['shop_name', 'month_year', 'gto_amount', 'gto_rent']], 
+                       left_on=['outlet_name', 'month_year'], right_on=['shop_name', 'month_year'], how='left')
+
+# Now aggregate the data by month_year and outlet_name (grouping)
+aggregated_data = merged_data.groupby(['month_year', 'outlet_name'], as_index=False).agg({
+    'gto_amount': 'sum',
+    'gto_rent': 'sum'
+})
+
+# Check the result (display the first few rows to verify the changes)
+print(aggregated_data.head())
+
+# Save the result to a new Excel file in 'combined data' folder
+aggregated_data.to_excel(output_combined_file, index=False)
+
+# Confirm the new file was saved
+print(f"✅ New file saved: {output_combined_file}")
