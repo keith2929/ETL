@@ -67,3 +67,32 @@ merged_campaign.to_excel(output_file, index=False)
 
 # Confirm the new file was saved
 print(f"✅ New file saved: {output_file}")
+
+# File paths for GTO data
+gto_file = '/Users/kimbogyeong/Desktop/Capstone/cleaned data/gto_monthly_rent_None_to_None.xlsx'
+output_gto_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/GTO.xlsx'
+
+# Load the GTO data
+gto_data = pd.read_excel(gto_file)
+
+# Print column names to verify if 'gto_reporting_month' exists
+print("Columns in GTO data:", gto_data.columns)
+
+# Assuming the correct column name is found (e.g., 'reporting_month')
+# Rename 'gto_reporting_month' to 'month_year' (if it exists)
+if 'gto_reporting_month' in gto_data.columns:
+    gto_data['month_year'] = pd.to_datetime(gto_data['gto_reporting_month'], errors='coerce').dt.strftime('%b-%Y')
+else:
+    print("⚠️ Column 'gto_reporting_month' not found. Please check the column name.")
+
+# Select only the relevant columns ('shop_name', 'gto_amount', 'gto_rent', 'month_year')
+gto_data_selected = gto_data[['shop_name', 'gto_amount', 'gto_rent', 'month_year']]
+
+# Check the result (display the first few rows to verify the changes)
+print(gto_data_selected.head())
+
+# Save the result to a new Excel file in 'combined data' folder
+gto_data_selected.to_excel(output_gto_file, index=False)
+
+# Confirm the new file was saved
+print(f"✅ New file saved: {output_gto_file}")
