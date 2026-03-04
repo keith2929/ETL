@@ -2,132 +2,157 @@ import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 import os
+import sys
 from scipy import stats
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set file paths
-DATA_FOLDER = r"C:\Users\user\OneDrive - Singapore Management University\Desktop\smu\subject\y4s2\capstone\cleaned data"
 
 class MallLoyaltyAnalyzer:
-    def __init__(self):
+    def __init__(self, data_folder):
+        self.data_folder = data_folder
         self.data = {}
         self.results = {}
         
     def load_data(self):
         """Load all CSV files from the cleaned data folder"""
         files = {
-            'campaign': 'campaign_all.csv',
-            'transactions': 'mall_member.csv', 
-            'monthly_sales': 'gto_monthly_sales.csv',
-            'monthly_rent': 'gto_monthly_rent.csv',
+            'campaign':        'campaign_all.csv',
+            'transactions':    'mall_member.csv', 
+            'monthly_sales':   'gto_monthly_sales.csv',
+            'monthly_rent':    'gto_monthly_rent.csv',
             'tenant_turnover': 'gto_tenant_turnover.csv'
         }
-        
         for key, filename in files.items():
-            filepath = os.path.join(DATA_FOLDER, filename)
+            filepath = os.path.join(self.data_folder, filename)
             if os.path.exists(filepath):
                 self.data[key] = pd.read_csv(filepath)
-                # Convert date columns
                 for col in self.data[key].columns:
                     if 'date' in col.lower():
                         self.data[key][col] = pd.to_datetime(self.data[key][col], errors='coerce')
         return self.data
 
 
-# File paths for campaign and transaction data
-campaign_file = '/Users/kimbogyeong/Desktop/Capstone/cleaned data/campaign_all.csv'
-transaction_file = '/Users/kimbogyeong/Desktop/Capstone/cleaned data/mall_member_2024_to_2025.csv'
-output_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/combined_campaign_transaction_gto.xlsx'
+# -----------------------------
+# Main Execution
+# -----------------------------
+if __name__ == "__main__":
+    # If run via main.py: paths passed as args
+    # If run directly in Spyder/VS Code: no args, load from config
+    if len(sys.argv) >= 3:
+        DATA_FOLDER     = sys.argv[1]
+        COMBINED_FOLDER = sys.argv[2]
+    else:
+        import pandas as _pd
+        from pathlib import Path as _Path
+        _config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
+        _script_dir  = _Path(__file__).resolve().parent
+        _config_path = _script_dir / _config_file
+        _paths_df    = _pd.read_excel(_config_path, sheet_name='paths')
+        _config      = dict(zip(_paths_df['Setting'].astype(str).str.strip(), _paths_df['Value']))
+        DATA_FOLDER     = str(_config.get('cleaned_data',  '')).strip()
+        COMBINED_FOLDER = str(_config.get('combined_data', '')).strip()
+        print(f"📖 Loaded config from {_config_file}")
 
-# Load the campaign data
-campaign = pd.read_csv(campaign_file)
+    print("\n" + "="*60)
+    print("REGRESSION PROCESS STARTING")
+    print("="*60)
+    print(f"📁 Cleaned data:  {DATA_FOLDER}")
+    print(f"📁 Combined data: {COMBINED_FOLDER}")
+    print("="*60 + "\n")
 
-# Load the transaction data (mall_member data)
-transaction = pd.read_csv(transaction_file)
+    if not os.path.exists(DATA_FOLDER):
+        print(f"❌ ERROR: Cleaned data folder not found at: {DATA_FOLDER}")
+        sys.exit(1)
 
-# Standardize column names to match (convert ReceiptNo to receipt_no)
-transaction = transaction.rename(columns={'ReceiptNo': 'receipt_no'})
+    os.makedirs(COMBINED_FOLDER, exist_ok=True)
 
-# Create 'month_year' column in the campaign data (combining 'month' and 'year')
-campaign['month_year'] = campaign['month'] + '-' + campaign['year'].astype(str)
+    # File paths — all derived from args
+    campaign_file        = os.path.join(DATA_FOLDER,     'campaign_all.csv')
+    transaction_file     = os.path.join(DATA_FOLDER,     'mall_member_2024_to_2025.csv')
+    output_file          = os.path.join(COMBINED_FOLDER, 'combined_campaign_transaction_gto.xlsx')
+    output_gto_file      = os.path.join(COMBINED_FOLDER, 'GTO.xlsx')
+    output_combined_file = os.path.join(COMBINED_FOLDER, 'combined_campaign_transaction_with_gto.xlsx')
 
-# Merge the two datasets based on 'receipt_no'
-merged_campaign = pd.merge(campaign, transaction[['receipt_no', "transaction_type", 'amount', 'points_earned']], on='receipt_no', how='left')
+    # Find GTO monthly rent file dynamically (name includes year range)
+    gto_files = [f for f in os.listdir(DATA_FOLDER) if 'gto_monthly_rent' in f and f.endswith('.xlsx')]
+    if not gto_files:
+        print("❌ No gto_monthly_rent file found in cleaned data folder.")
+        sys.exit(1)
+    gto_file = os.path.join(DATA_FOLDER, gto_files[0])
 
-# Drop unwanted columns from merged_campaign (after merging)
-columns_to_remove = ['sr_no', 'voucher_code', 'voucher_value', 'transaction_date', 'year', 'campaign_type', 'month']
-merged_campaign = merged_campaign.drop(columns=columns_to_remove, errors='ignore')
+    # ----------------------------
+    # Step 1: Merge campaign + transaction
+    # ----------------------------
+    print("📊 Step 1: Merging campaign and transaction data...")
 
-# Check the result (display the first few rows to verify the merge and column removal)
-print(merged_campaign.head())
+    campaign    = pd.read_csv(campaign_file)
+    transaction = pd.read_csv(transaction_file)
 
-# Save the merged result to a new Excel file in 'combined data' folder
-merged_campaign.to_excel(output_file, index=False)
+    transaction = transaction.rename(columns={'ReceiptNo': 'receipt_no'})
+    campaign['month_year'] = campaign['month'] + '-' + campaign['year'].astype(str)
 
-# Confirm the new file was saved
-print(f"✅ New file saved: {output_file}")
+    merged_campaign = pd.merge(
+        campaign,
+        transaction[['receipt_no', 'transaction_type', 'amount', 'points_earned']],
+        on='receipt_no',
+        how='left'
+    )
 
-# File paths for GTO data
-gto_file = '/Users/kimbogyeong/Desktop/Capstone/cleaned data/gto_monthly_rent_None_to_None.xlsx'
-output_gto_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/GTO.xlsx'
+    columns_to_remove = ['sr_no', 'voucher_code', 'voucher_value', 'transaction_date',
+                         'year', 'campaign_type', 'month']
+    merged_campaign = merged_campaign.drop(columns=columns_to_remove, errors='ignore')
 
-# Load the GTO data
-gto_data = pd.read_excel(gto_file)
+    merged_campaign.to_excel(output_file, index=False)
+    print(f"✅ Saved: {output_file}")
 
-# Print column names to verify if 'gto_reporting_month' exists
-print("Columns in GTO data:", gto_data.columns)
+    # ----------------------------
+    # Step 2: Process GTO data
+    # ----------------------------
+    print("\n📊 Step 2: Processing GTO data...")
 
-# Assuming the correct column name is found (e.g., 'reporting_month')
-# Rename 'gto_reporting_month' to 'month_year' (if it exists)
-if 'gto_reporting_month' in gto_data.columns:
-    gto_data['month_year'] = pd.to_datetime(gto_data['gto_reporting_month'], errors='coerce').dt.strftime('%b-%Y')
-else:
-    print("⚠️ Column 'gto_reporting_month' not found. Please check the column name.")
+    gto_data = pd.read_excel(gto_file)
 
-# Select only the relevant columns ('shop_name', 'gto_amount', 'gto_rent', 'month_year')
-gto_data_selected = gto_data[['shop_name', 'gto_amount', 'gto_rent', 'month_year']]
+    if 'gto_reporting_month' in gto_data.columns:
+        gto_data['month_year'] = pd.to_datetime(
+            gto_data['gto_reporting_month'], errors='coerce'
+        ).dt.strftime('%b-%Y')
+    else:
+        print("⚠️ Column 'gto_reporting_month' not found. Please check the column name.")
 
-# Check the result (display the first few rows to verify the changes)
-print(gto_data_selected.head())
+    gto_data_selected = gto_data[['shop_name', 'gto_amount', 'gto_rent', 'month_year']]
+    gto_data_selected.to_excel(output_gto_file, index=False)
+    print(f"✅ Saved: {output_gto_file}")
 
-# Save the result to a new Excel file in 'combined data' folder
-gto_data_selected.to_excel(output_gto_file, index=False)
+    # ----------------------------
+    # Step 3: Merge GTO with combined campaign data
+    # ----------------------------
+    print("\n📊 Step 3: Merging GTO with combined campaign/transaction data...")
 
-# Confirm the new file was saved
-print(f"✅ New file saved: {output_gto_file}")
+    gto_data          = pd.read_excel(output_gto_file)
+    combined_campaign = pd.read_excel(output_file)
 
-# File paths for the GTO and combined data
-gto_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/GTO.xlsx'
-combined_campaign_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/combined_campaign_transaction_gto.xlsx'
-output_combined_file = '/Users/kimbogyeong/Desktop/Capstone/combined data/combined_campaign_transaction_with_gto.xlsx'
+    combined_campaign['outlet_name'] = combined_campaign['outlet_name'].str.lower().str.strip()
+    gto_data['shop_name']            = gto_data['shop_name'].str.lower().str.strip()
 
-# Load the GTO and combined campaign data
-gto_data = pd.read_excel(gto_file)
-combined_campaign = pd.read_excel(combined_campaign_file)
+    gto_data_unique = gto_data.drop_duplicates(subset=['shop_name', 'month_year'])
 
-# Normalize text: convert both 'outlet_name' and 'shop_name' to lowercase and strip any spaces
-combined_campaign['outlet_name'] = combined_campaign['outlet_name'].str.lower().str.strip()
-gto_data['shop_name'] = gto_data['shop_name'].str.lower().str.strip()
+    merged_data = pd.merge(
+        combined_campaign,
+        gto_data_unique[['shop_name', 'month_year', 'gto_amount', 'gto_rent']],
+        left_on=['outlet_name', 'month_year'],
+        right_on=['shop_name', 'month_year'],
+        how='left'
+    )
 
-# Ensure there's no duplicate data in the gto_data based on 'shop_name' and 'month_year' 
-gto_data_unique = gto_data.drop_duplicates(subset=['shop_name', 'month_year'])
+    aggregated_data = merged_data.groupby(
+        ['month_year', 'outlet_name'], as_index=False
+    ).agg({'gto_amount': 'sum', 'gto_rent': 'sum'})
 
-# Merge GTO data with the combined campaign data based on 'shop_name' and 'month_year'
-merged_data = pd.merge(combined_campaign, gto_data_unique[['shop_name', 'month_year', 'gto_amount', 'gto_rent']], 
-                       left_on=['outlet_name', 'month_year'], right_on=['shop_name', 'month_year'], how='left')
+    aggregated_data.to_excel(output_combined_file, index=False)
+    print(f"✅ Saved: {output_combined_file}")
 
-# Now aggregate the data by month_year and outlet_name (grouping)
-aggregated_data = merged_data.groupby(['month_year', 'outlet_name'], as_index=False).agg({
-    'gto_amount': 'sum',
-    'gto_rent': 'sum'
-})
-
-# Check the result (display the first few rows to verify the changes)
-print(aggregated_data.head())
-
-# Save the result to a new Excel file in 'combined data' folder
-aggregated_data.to_excel(output_combined_file, index=False)
-
-# Confirm the new file was saved
-print(f"✅ New file saved: {output_combined_file}")
+    print("\n" + "="*60)
+    print("✅ REGRESSION COMPLETED — outputs saved to:")
+    print(f"   {COMBINED_FOLDER}")
+    print("="*60)
