@@ -50,16 +50,22 @@ def run_script(label: str, path: Path, args: list) -> bool:
     print(f"▶  Running: {label}  ({path.name})")
     print("="*60)
 
-    result = subprocess.run(
+    process = subprocess.Popen(
         [sys.executable, str(path)] + args,
-        cwd=str(SCRIPT_DIR)
+        cwd=str(SCRIPT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
     )
+    for line in process.stdout:
+        print(line, end='')
+    process.wait()
 
-    if result.returncode == 0:
+    if process.returncode == 0:
         print(f"\n✅ {label} completed successfully.")
         return True
     else:
-        print(f"\n❌ {label} failed with exit code {result.returncode}.")
+        print(f"\n❌ {label} failed with exit code {process.returncode}.")
         return False
 
 
@@ -81,9 +87,9 @@ if __name__ == "__main__":
     schemas      = paths.get('schemas',       '')
     shop_mapping  = paths.get('shop_mapping',   '')
 
-    if not all([raw_data, cleaned_data, combined_data, schemas]):
+    if not all([raw_data, cleaned_data, combined_data, schemas, shop_mapping]):
         print("\n❌ One or more required paths are missing from config. Check your config file.")
-        print("   Required settings: raw_data, cleaned_data, combined_data, schemas")
+        print("   Required settings: raw_data, cleaned_data, combined_data, schemas, shop_mapping")
         sys.exit(1)
 
     print(f"\n  raw_data:      {raw_data}")
@@ -94,7 +100,7 @@ if __name__ == "__main__":
 
     # Script definitions with the args each needs
     scripts_with_args = [
-        ("Data Loader", SCRIPT_DIR / "data_loader.py", [raw_data, cleaned_data, schemas, config_file]),
+        ("Data Loader", SCRIPT_DIR / "data_loader.py", [raw_data, cleaned_data, schemas, shop_mapping, config_file]),
         ("Regression",  SCRIPT_DIR / "regression.py",  [cleaned_data, combined_data]),
     ]
 

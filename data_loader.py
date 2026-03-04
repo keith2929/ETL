@@ -3,6 +3,7 @@ import glob
 import os
 import re
 from collections import defaultdict
+from difflib import get_close_matches
 import sys
 from pathlib import Path
 
@@ -380,6 +381,7 @@ def resolve_shop_names(campaign_names: pd.Series, gto_names: pd.Series,
         if name in existing and existing[name]['confirmed']:
             rows.append({
                 'campaign_name':      name,
+                'gto_name':           existing[name]['confirmed'],
                 'suggested_gto_name': existing[name]['suggested'],
                 'confirmed_gto_name': existing[name]['confirmed'],
                 'method':             'confirmed'
@@ -388,39 +390,70 @@ def resolve_shop_names(campaign_names: pd.Series, gto_names: pd.Series,
             resolved, method = resolve_shop_name(name, gto_names_lower)
             rows.append({
                 'campaign_name':      name,
+                'gto_name':           resolved if method != 'unmatched' else '',
                 'suggested_gto_name': resolved,
                 'confirmed_gto_name': existing.get(name, {}).get('confirmed', ''),
                 'method':             method
             })
 
-    resolution_df = pd.DataFrame(rows)
+    # Sort: matched rows first, unmatched at bottom with blank rows for easy editing
+    matched   = [r for r in rows if r['method'] != 'unmatched']
+    unmatched = [r for r in rows if r['method'] == 'unmatched']
+
+    # Add blank filler rows after unmatched so they're easy to fill in
+    blank_rows = [{'campaign_name': r['campaign_name'], 'gto_name': '',
+                   'suggested_gto_name': '', 'confirmed_gto_name': '', 'method': 'unmatched'}
+                  for r in unmatched]
+
+    resolution_df = pd.DataFrame(matched + blank_rows)
+
+    # Find GTO names with no matching campaign name — append as gto_only rows
+    resolved_gto_names = set(resolution_df['suggested_gto_name'].astype(str).str.strip().str.lower().dropna())
+    resolved_gto_names |= set(resolution_df['confirmed_gto_name'].astype(str).str.strip().str.lower().dropna()) - {'', 'nan'}
+    gto_only = sorted([n for n in gto_names_lower if n not in resolved_gto_names])
+
+    gto_only_rows = pd.DataFrame([{
+        'campaign_name':      '',
+        'gto_name':           name,
+        'suggested_gto_name': '',
+        'confirmed_gto_name': '',
+        'method':             'gto_only'
+    } for name in gto_only])
+
+    full_mapping_df = pd.concat([resolution_df, gto_only_rows], ignore_index=True)
 
     # Save updated mapping file
     with pd.ExcelWriter(mapping_file, engine='openpyxl') as writer:
-        resolution_df.to_excel(writer, sheet_name='mapping', index=False)
+        full_mapping_df.drop(columns=['final_gto_name'], errors='ignore').to_excel(
+            writer, sheet_name='mapping', index=False)
         pd.DataFrame([
-            {"Instructions": "DO NOT edit campaign_name or suggested_gto_name columns."},
-            {"Instructions": "Fill confirmed_gto_name to override a suggestion or fix an unmatched entry."},
-            {"Instructions": "Leave confirmed_gto_name blank to use the suggested match."},
+            {"Instructions": "campaign_name: outlet name from campaign data — DO NOT edit."},
+            {"Instructions": "gto_name: the GTO name used for matching (confirmed > suggested)."},
+            {"Instructions": "suggested_gto_name: best automatic match — DO NOT edit."},
+            {"Instructions": "confirmed_gto_name: fill this in to override a suggestion or fix unmatched rows."},
+            {"Instructions": "method: exact/fuzzy/confirmed = campaign matched to GTO; unmatched = campaign with no GTO match; gto_only = GTO shop with no campaign activity."},
+            {"Instructions": "Unmatched campaign rows and gto_only rows are at the bottom."},
             {"Instructions": "Re-run the pipeline after editing — confirmed entries are preserved automatically."},
         ]).to_excel(writer, sheet_name='instructions', index=False)
+
     print(f"📝 shop_mapping.xlsx updated — review and correct any fuzzy/unmatched entries.")
+    if gto_only:
+        print(f"   ℹ️  {len(gto_only)} GTO shops have no campaign match (method: gto_only).")
 
     # Summary
-    counts = resolution_df['method'].value_counts()
+    counts = pd.Series([r['method'] for r in rows]).value_counts()
     print(f"\n📊 Shop name resolution summary:")
     for method, count in counts.items():
         print(f"   {method}: {count}")
 
-    unmatched = resolution_df[resolution_df['method'] == 'unmatched']
-    if not unmatched.empty:
+    if unmatched:
         print(f"\n⚠️  {len(unmatched)} unmatched — fill confirmed_gto_name in shop_mapping.xlsx:")
-        for name in unmatched['campaign_name'].tolist():
-            print(f"   - {name}")
+        for r in unmatched:
+            print(f"   - {r['campaign_name']}")
 
     # final_gto_name: confirmed takes priority, else suggested
     resolution_df['final_gto_name'] = resolution_df['confirmed_gto_name'].where(
-        resolution_df['confirmed_gto_name'].str.strip().str.len() > 0,
+        resolution_df['confirmed_gto_name'].astype(str).str.strip().str.len() > 0,
         resolution_df['suggested_gto_name']
     )
 
@@ -431,19 +464,21 @@ def resolve_shop_names(campaign_names: pd.Series, gto_names: pd.Series,
 # Main Execution
 # -----------------------------
 if __name__ == "__main__":
-    # Paths passed from main.py as args: raw_data, cleaned_data, schemas, config_file
-    if len(sys.argv) < 4:
-        print("❌ data_loader.py expects args: raw_data cleaned_data schemas config_file")
-        exit(1)
-
-    file_path   = sys.argv[1]
-    output_path = sys.argv[2]
-    schema_file = sys.argv[3]
-    config_file = sys.argv[4] if len(sys.argv) > 4 else "config_Keith.xlsx"
-
-    # Load GTO header rows from config
-    script_dir = Path(__file__).resolve().parent
-    _, _, _, header_rows_config, _ = load_configuration(config_file)
+    # If run via main.py: args are raw_data, cleaned_data, schemas, shop_mapping, config_file
+    # If run directly in Spyder/VS Code: no args, load everything from config
+    if len(sys.argv) >= 5:
+        file_path    = sys.argv[1]
+        output_path  = sys.argv[2]
+        schema_file  = sys.argv[3]
+        mapping_file = sys.argv[4]
+        config_file  = sys.argv[5] if len(sys.argv) > 5 else "config_Keith.xlsx"
+        _, _, _, header_rows_config, _ = load_configuration(config_file)
+    else:
+        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
+        file_path, output_path, schema_file, header_rows_config, _ = load_configuration(config_file)
+        _paths_df    = pd.read_excel(Path(__file__).resolve().parent / config_file, sheet_name='paths')
+        _config      = dict(zip(_paths_df['Setting'].astype(str).str.strip(), _paths_df['Value']))
+        mapping_file = str(_config.get('shop_mapping', '')).strip()
 
     print("\n" + "="*60)
     print("ETL PROCESS STARTING")
@@ -504,7 +539,44 @@ if __name__ == "__main__":
 
     # Export all datasets
     export_to_excel(merged_data, output_path)
-    
+
+    # -----------------------------
+    # Resolve shop names (campaign outlet_name → GTO shop_name)
+    # Adds 'final_gto_name' column to campaign_all for use in regression
+    # -----------------------------
+    if 'campaign_all' in merged_data:
+        print("\n" + "="*60)
+        print("RESOLVING SHOP NAMES")
+        print("="*60)
+
+        gto_shop_names = pd.Series(dtype=str)
+        for key, df in merged_data.items():
+            if 'gto' in key and 'shop_name' in df.columns:
+                gto_shop_names = df['shop_name']
+                break
+
+        if gto_shop_names.empty:
+            print("⚠️ No GTO data found — skipping shop name resolution.")
+        else:
+            campaign_df = merged_data['campaign_all'].copy()
+            resolution  = resolve_shop_names(campaign_df['outlet_name'], gto_shop_names, mapping_file)
+
+            campaign_df['outlet_name_lower'] = campaign_df['outlet_name'].str.strip().str.lower()
+            campaign_df = campaign_df.merge(
+                resolution[['campaign_name', 'final_gto_name']],
+                left_on='outlet_name_lower',
+                right_on='campaign_name',
+                how='left'
+            ).drop(columns=['outlet_name_lower', 'campaign_name'], errors='ignore')
+
+            merged_data['campaign_all'] = campaign_df
+
+            camp_xlsx = os.path.join(output_path, 'campaign_all.xlsx')
+            camp_csv  = os.path.join(output_path, 'campaign_all.csv')
+            campaign_df.to_excel(camp_xlsx, index=False)
+            campaign_df.to_csv(camp_csv, index=False, encoding='utf-8-sig')
+            print(f"✅ Re-exported campaign_all with resolved shop names")
+
     print("\n" + "="*60)
     print(f"✅ ETL PROCESS COMPLETED SUCCESSFULLY")
     print(f"📊 Created {len(merged_data)} cleaned datasets")
