@@ -14,13 +14,8 @@ Usage (client):
 """
 
 import os
-import sys
 import subprocess
-import io
-
-# Force UTF-8 output so emoji from subprocesses display correctly on Windows
-if sys.stdout.encoding != "utf-8":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+import sys
 from pathlib import Path
 
 try:
@@ -81,8 +76,7 @@ def run_script(label: str, path: Path, args: list) -> bool:
         env=env
     )
     for line in process.stdout:
-        sys.stdout.buffer.write(line.encode('utf-8', errors='replace'))
-        sys.stdout.buffer.flush()
+        print(line, end='')
     process.wait()
 
     if process.returncode == 0:

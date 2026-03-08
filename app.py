@@ -183,6 +183,7 @@ def run_pipeline(config_file: str, log_queue: queue.Queue):
 # ── Session state ─────────────────────────────────────────────────────────────
 if 'log_lines' not in st.session_state: st.session_state.log_lines = []
 if 'last_exit' not in st.session_state: st.session_state.last_exit = None
+if 'running'   not in st.session_state: st.session_state.running   = False
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -226,45 +227,57 @@ with tab_run:
         st.session_state.log_queue = q
         threading.Thread(target=run_pipeline, args=(selected_config, q), daemon=True).start()
 
-    if st.session_state.running or st.session_state.log_lines:
-        status_placeholder = st.empty()
+    # Persistent placeholders — created once, updated in-place so only their
+    # content changes, not the whole page. This eliminates the flicker.
+    status_placeholder = st.empty()
+    log_placeholder    = st.empty()
 
-        if st.session_state.running:
-            # Drain queue into log_lines
-            q = st.session_state.log_queue
-            while True:
-                try:
-                    line = q.get(timeout=0.05)
-                    if line.startswith("__EXIT__"):
-                        st.session_state.last_exit = int(line.replace("__EXIT__", ""))
-                        st.session_state.running   = False
-                        break
-                    st.session_state.log_lines.append(line.rstrip())
-                except queue.Empty:
+    if st.session_state.running:
+        # Drain ALL available lines in one go before rendering
+        q = st.session_state.log_queue
+        while True:
+            try:
+                line = q.get_nowait()
+                if line.startswith("__EXIT__"):
+                    st.session_state.last_exit = int(line.replace("__EXIT__", ""))
+                    st.session_state.running   = False
                     break
+                st.session_state.log_lines.append(line.rstrip())
+            except queue.Empty:
+                break
 
-        # Detect which scripts have completed from log
-        all_log = "\n".join(st.session_state.log_lines)
-        loader_done     = "OK Data Loader completed" in all_log or "DATA LOADER COMPLETED" in all_log or "COMPLETED" in all_log
-        regression_done = "OK Regression completed"  in all_log or "REGRESSION COMPLETED" in all_log or "ANALYSIS COMPLETED" in all_log
+    if st.session_state.running or st.session_state.log_lines or st.session_state.last_exit is not None:
+        all_log         = "\n".join(st.session_state.log_lines)
+        loader_done     = "OK Data Loader completed" in all_log or "COMPLETED" in all_log
+        regression_done = "OK Regression completed"  in all_log or "REGRESSION COMPLETED" in all_log
 
+        # Update status badge in-place (no full page re-render)
         if st.session_state.running:
-            # Show live step progress without flickering
             if regression_done:
                 status_placeholder.info("⏳ Finalising...")
             elif loader_done:
                 status_placeholder.info("✅ Data Loader complete — running Regression...")
             else:
                 status_placeholder.info("⏳ Running Data Loader...")
-            time.sleep(0.3)
-            st.rerun()
         elif st.session_state.last_exit == 0:
             status_placeholder.success("✅ Data Loader complete  ·  ✅ Regression complete")
         elif st.session_state.last_exit is not None:
-            # Show last error line from log for context
-            error_lines = [l for l in st.session_state.log_lines if 'error' in l.lower() or 'ERROR' in l]
+            error_lines = [l for l in st.session_state.log_lines if 'error' in l.lower()]
             hint = error_lines[-1] if error_lines else "Check logs for details."
             status_placeholder.error(f"❌ Pipeline failed — {hint}")
+
+        # Update log box in-place — no flicker since placeholder already exists
+        if st.session_state.log_lines:
+            log_text = "\n".join(st.session_state.log_lines[-300:])
+            log_placeholder.markdown(
+                f'<div class="log-box">{log_text}</div>',
+                unsafe_allow_html=True
+            )
+
+        # Only rerun while actively running; longer interval = less flicker
+        if st.session_state.running:
+            time.sleep(0.8)
+            st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -439,8 +452,7 @@ with tab_schema:
 with tab_insights:
     import json
 
-    sel_cfg      = st.selectbox("Config file", configs, key="insights_cfg")
-    paths        = load_config(sel_cfg)
+    paths        = load_config(selected_config)
     combined_folder = paths.get('combined_data', '')
     json_path    = os.path.join(combined_folder, 'insights.json') if combined_folder else ''
 
@@ -477,11 +489,15 @@ with tab_insights:
 
         if roi.get('summary'):
             s = roi['summary']
+            avg_roi    = s.get('avg_roi_ratio')
+            median_roi = s.get('median_roi_ratio')
+            total_v    = s.get('total_voucher_redeemed') or 0
+            total_gto  = s.get('total_gto_revenue')      or 0
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Avg ROI Ratio",        f"{s.get('avg_roi_ratio','—')}x")
-            c2.metric("Median ROI Ratio",     f"{s.get('median_roi_ratio','—')}x")
-            c3.metric("Total Vouchers ($)",   f"${s.get('total_voucher_redeemed',0):,.0f}")
-            c4.metric("Total GTO Revenue ($)",f"${s.get('total_gto_revenue',0):,.0f}")
+            c1.metric("Avg ROI Ratio",         f"{avg_roi}x"    if avg_roi    is not None else "—")
+            c2.metric("Median ROI Ratio",      f"{median_roi}x" if median_roi is not None else "—")
+            c3.metric("Total Txn Revenue ($)", f"${total_v:,.0f}")
+            c4.metric("Total GTO Revenue ($)", f"${total_gto:,.0f}")
 
         if roi.get('monthly_roi'):
             df_roi = pd.DataFrame(roi['monthly_roi'])
@@ -505,18 +521,23 @@ with tab_insights:
             df_ct = pd.DataFrame(ct['gto_by_funding_type'])
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("**GTO Revenue by Funding Type**")
-                st.bar_chart(df_ct.set_index('funding_type')['total_gto_revenue'])
+                if 'funding_type' in df_ct.columns and 'total_gto_revenue' in df_ct.columns:
+                    st.markdown("**GTO Revenue by Funding Type**")
+                    st.bar_chart(df_ct.set_index('funding_type')['total_gto_revenue'])
             with col2:
-                st.markdown("**ROI Ratio by Funding Type**")
-                st.bar_chart(df_ct.set_index('funding_type')['roi_ratio'])
+                if 'funding_type' in df_ct.columns and 'roi_ratio' in df_ct.columns:
+                    st.markdown("**ROI Ratio by Funding Type**")
+                    st.bar_chart(df_ct.set_index('funding_type')['roi_ratio'])
 
         if ct.get('monthly_by_type'):
             df_monthly = pd.DataFrame(ct['monthly_by_type'])
-            if 'funding_type' in df_monthly.columns:
-                pivoted = df_monthly.pivot(index='month_year', columns='funding_type', values='redemptions').fillna(0)
-                st.markdown("**Monthly Redemptions by Funding Type**")
-                st.bar_chart(pivoted)
+            if 'funding_type' in df_monthly.columns and 'month_year' in df_monthly.columns:
+                try:
+                    pivoted = df_monthly.pivot(index='month_year', columns='funding_type', values='redemptions').fillna(0)
+                    st.markdown("**Monthly Redemptions by Funding Type**")
+                    st.bar_chart(pivoted)
+                except Exception:
+                    st.dataframe(df_monthly, use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
@@ -534,17 +555,27 @@ with tab_insights:
         if loy.get('top_outlets_by_points'):
             st.markdown("**Top 10 Outlets by Points Earned**")
             df_pts = pd.DataFrame(loy['top_outlets_by_points'])
-            st.bar_chart(df_pts.set_index('final_gto_name')['total_points'])
+            name_col = 'final_gto_name' if 'final_gto_name' in df_pts.columns else df_pts.columns[0]
+            if 'total_points' in df_pts.columns:
+                st.bar_chart(df_pts.set_index(name_col)['total_points'])
             st.dataframe(df_pts, use_container_width=True, hide_index=True)
 
         if loy.get('regression'):
             reg = loy['regression']
             if 'error' not in reg:
-                st.markdown(f"**Regression: what drives GTO revenue?** &nbsp; R² = `{reg.get('r_squared','—')}`")
+                r2      = reg.get('r_squared', '—')
+                insight = reg.get('insight', '')
+                st.markdown(f"**Regression: what drives GTO revenue?** &nbsp; R² = `{r2}`")
+                if insight:
+                    st.caption(insight)
                 coef_df = pd.DataFrame([
-                    {'variable': k, 'coefficient': v, 'p_value': reg['pvalues'].get(k,'—'),
-                     'significant': '✅' if k in reg.get('significant',[]) else ''}
-                    for k, v in reg.get('coefs',{}).items() if k != 'const'
+                    {
+                        'variable':    k,
+                        'coefficient': v,
+                        'p_value':     reg.get('pvalues', {}).get(k, '—'),
+                        'significant': '✅' if k in reg.get('significant', []) else '',
+                    }
+                    for k, v in reg.get('coefs', {}).items() if k != 'const'
                 ])
                 st.dataframe(coef_df, use_container_width=True, hide_index=True)
 
@@ -556,8 +587,10 @@ with tab_insights:
 
         if tt.get('turnover_by_trade_type'):
             df_tt = pd.DataFrame(tt['turnover_by_trade_type'])
+            trade_name_col = 'ion_trade_type_name' if 'ion_trade_type_name' in df_tt.columns else df_tt.columns[0]
             st.markdown("**Turnover Rate by Trade Type**")
-            st.bar_chart(df_tt.set_index('ion_trade_type_name')['turnover_rate_pct'])
+            if 'turnover_rate_pct' in df_tt.columns:
+                st.bar_chart(df_tt.set_index(trade_name_col)['turnover_rate_pct'])
             st.dataframe(df_tt, use_container_width=True, hide_index=True)
 
         if tt.get('gto_stayed_vs_exited'):
@@ -567,13 +600,17 @@ with tab_insights:
             with col1:
                 st.markdown("**Stayed**")
                 st.metric("Count",          sv['stayed'].get('count','—'))
-                st.metric("Avg GTO ($)",    f"${sv['stayed'].get('avg_gto_amount',0):,.0f}" if sv['stayed'].get('avg_gto_amount') else '—')
-                st.metric("Avg GTO Rent ($)",f"${sv['stayed'].get('avg_gto_rent',0):,.0f}" if sv['stayed'].get('avg_gto_rent') else '—')
+                stayed_a = sv['stayed'].get('avg_gto_amount')
+                stayed_r = sv['stayed'].get('avg_gto_rent')
+                st.metric("Avg GTO ($)",      f"${stayed_a:,.0f}" if stayed_a is not None else '—')
+                st.metric("Avg GTO Rent ($)", f"${stayed_r:,.0f}" if stayed_r is not None else '—')
             with col2:
                 st.markdown("**Exited**")
                 st.metric("Count",          sv['exited'].get('count','—'))
-                st.metric("Avg GTO ($)",    f"${sv['exited'].get('avg_gto_amount',0):,.0f}" if sv['exited'].get('avg_gto_amount') else '—')
-                st.metric("Avg GTO Rent ($)",f"${sv['exited'].get('avg_gto_rent',0):,.0f}" if sv['exited'].get('avg_gto_rent') else '—')
+                exited_a = sv['exited'].get('avg_gto_amount')
+                exited_r = sv['exited'].get('avg_gto_rent')
+                st.metric("Avg GTO ($)",      f"${exited_a:,.0f}" if exited_a is not None else '—')
+                st.metric("Avg GTO Rent ($)", f"${exited_r:,.0f}" if exited_r is not None else '—')
 
         # Download report
         st.markdown("---")
