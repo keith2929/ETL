@@ -13,14 +13,30 @@ Usage (client):
     Double-click run_pipeline.bat (Windows) or run_pipeline.command (Mac)
 """
 
-import subprocess
+import os
 import sys
+import subprocess
+import io
+
+# Force UTF-8 output so emoji from subprocesses display correctly on Windows
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 from pathlib import Path
 
 try:
-    SCRIPT_DIR = Path(__file__).resolve().parent
-except NameError:
-    SCRIPT_DIR = Path.cwd()
+    # Running as a PyInstaller .exe — files are extracted to a temp folder
+    SCRIPT_DIR = Path(sys._MEIPASS)
+except AttributeError:
+    try:
+        SCRIPT_DIR = Path(__file__).resolve().parent
+    except NameError:
+        SCRIPT_DIR = Path.cwd()
+
+# Config, schemas, shop_mapping sit next to the .exe (or script), not in the bundle
+try:
+    CONFIG_DIR = Path(sys.executable).resolve().parent
+except Exception:
+    CONFIG_DIR = SCRIPT_DIR
 
 SCRIPTS = [
     ("Data Loader", SCRIPT_DIR / "data_loader.py"),
@@ -34,9 +50,12 @@ def load_config_paths(config_file: str) -> dict:
     """Read all paths from config once. All scripts receive paths as args."""
     import pandas as pd
 
-    config_path = SCRIPT_DIR / config_file
+    # Config lives next to the .exe, not inside the bundle
+    config_path = CONFIG_DIR / config_file
     if not config_path.exists():
-        print(f"⚠️  Config file '{config_file}' not found — scripts will use their hardcoded defaults.")
+        config_path = SCRIPT_DIR / config_file  # fallback for dev mode
+    if not config_path.exists():
+        print(f"WARNING  Config file '{config_file}' not found in {CONFIG_DIR}")
         return {}
 
     paths_df = pd.read_excel(config_path, sheet_name='paths')
@@ -47,25 +66,30 @@ def load_config_paths(config_file: str) -> dict:
 def run_script(label: str, path: Path, args: list) -> bool:
     """Run a script as a subprocess with given args. Returns True if successful."""
     print("\n" + "="*60)
-    print(f"▶  Running: {label}  ({path.name})")
+    print(f"Running: {label}  ({path.name})")
     print("="*60)
 
+    env = os.environ.copy()
+    env['PYTHONIOENCODING'] = 'utf-8'
     process = subprocess.Popen(
         [sys.executable, str(path)] + args,
         cwd=str(SCRIPT_DIR),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        encoding='utf-8',
+        env=env
     )
     for line in process.stdout:
-        print(line, end='')
+        sys.stdout.buffer.write(line.encode('utf-8', errors='replace'))
+        sys.stdout.buffer.flush()
     process.wait()
 
     if process.returncode == 0:
-        print(f"\n✅ {label} completed successfully.")
+        print(f"\nOK {label} completed successfully.")
         return True
     else:
-        print(f"\n❌ {label} failed with exit code {process.returncode}.")
+        print(f"\nERROR {label} failed with exit code {process.returncode}.")
         return False
 
 
@@ -81,14 +105,14 @@ if __name__ == "__main__":
     # Load config once here — pass paths as arguments to each script
     paths = load_config_paths(config_file)
 
-    raw_data     = paths.get('raw_data',      '')
-    cleaned_data = paths.get('cleaned_data',  '')
-    combined_data= paths.get('combined_data', '')
-    schemas      = paths.get('schemas',       '')
-    shop_mapping  = paths.get('shop_mapping',   '')
+    raw_data      = paths.get('raw_data',      '')
+    cleaned_data  = paths.get('cleaned_data',  '')
+    combined_data = paths.get('combined_data', '')
+    schemas       = paths.get('schemas',       '')
+    shop_mapping  = paths.get('shop_mapping',  '')
 
     if not all([raw_data, cleaned_data, combined_data, schemas, shop_mapping]):
-        print("\n❌ One or more required paths are missing from config. Check your config file.")
+        print("\nERROR One or more required paths are missing from config. Check your config file.")
         print("   Required settings: raw_data, cleaned_data, combined_data, schemas, shop_mapping")
         sys.exit(1)
 
@@ -106,16 +130,16 @@ if __name__ == "__main__":
 
     for label, script_path, args in scripts_with_args:
         if not script_path.exists():
-            print(f"\n❌ Script not found: {script_path}")
+            print(f"\nERROR Script not found: {script_path}")
             print("   Pipeline aborted.")
             sys.exit(1)
 
         success = run_script(label, script_path, args)
 
         if not success:
-            print(f"\n⛔ Pipeline stopped after '{label}' failed.")
+            print(f"\nSTOPPED Pipeline stopped after '{label}' failed.")
             sys.exit(1)
 
     print("\n" + "="*60)
-    print("  ✅ FULL PIPELINE COMPLETED SUCCESSFULLY")
+    print("  OK FULL PIPELINE COMPLETED SUCCESSFULLY")
     print("="*60)

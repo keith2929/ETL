@@ -6,6 +6,7 @@ import os
 import threading
 import queue
 import time
+import json
 from pathlib import Path
 
 st.set_page_config(
@@ -181,9 +182,7 @@ def run_pipeline(config_file: str, log_queue: queue.Queue):
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if 'log_lines' not in st.session_state: st.session_state.log_lines = []
-if 'running'   not in st.session_state: st.session_state.running   = False
 if 'last_exit' not in st.session_state: st.session_state.last_exit = None
-if 'log_queue' not in st.session_state: st.session_state.log_queue = None
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -198,8 +197,12 @@ if not configs:
     st.error("No config_*.xlsx file found in the app folder.")
     st.stop()
 
-tab_run, tab_config, tab_mapping, tab_schema = st.tabs([
-    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA"
+# Global config selector — applies to all tabs
+selected_config = st.selectbox("Config", configs, key="global_config", label_visibility="collapsed")
+st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+tab_run, tab_config, tab_mapping, tab_schema, tab_insights = st.tabs([
+    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA", "📊  INSIGHTS"
 ])
 
 
@@ -207,14 +210,9 @@ tab_run, tab_config, tab_mapping, tab_schema = st.tabs([
 # TAB 1 — RUN
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_run:
-    selected_config = st.selectbox("Config", configs, label_visibility="collapsed")
-
-    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
-
     run_clicked = st.button(
         "▶  RUN PIPELINE",
         type="primary",
-        disabled=st.session_state.running,
         use_container_width=True
     )
 
@@ -229,10 +227,10 @@ with tab_run:
         threading.Thread(target=run_pipeline, args=(selected_config, q), daemon=True).start()
 
     if st.session_state.running or st.session_state.log_lines:
-        log_placeholder    = st.empty()
         status_placeholder = st.empty()
 
         if st.session_state.running:
+            # Drain queue into log_lines
             q = st.session_state.log_queue
             while True:
                 try:
@@ -245,26 +243,35 @@ with tab_run:
                 except queue.Empty:
                     break
 
-        log_placeholder.markdown(
-            f'<div class="log-box">{"<br>".join(st.session_state.log_lines)}</div>',
-            unsafe_allow_html=True
-        )
+        # Detect which scripts have completed from log
+        all_log = "\n".join(st.session_state.log_lines)
+        loader_done     = "OK Data Loader completed" in all_log or "DATA LOADER COMPLETED" in all_log or "COMPLETED" in all_log
+        regression_done = "OK Regression completed"  in all_log or "REGRESSION COMPLETED" in all_log or "ANALYSIS COMPLETED" in all_log
 
         if st.session_state.running:
-            status_placeholder.info("⏳ Pipeline running...")
+            # Show live step progress without flickering
+            if regression_done:
+                status_placeholder.info("⏳ Finalising...")
+            elif loader_done:
+                status_placeholder.info("✅ Data Loader complete — running Regression...")
+            else:
+                status_placeholder.info("⏳ Running Data Loader...")
             time.sleep(0.3)
             st.rerun()
         elif st.session_state.last_exit == 0:
-            status_placeholder.success("✅ Pipeline completed successfully.")
+            status_placeholder.success("✅ Data Loader complete  ·  ✅ Regression complete")
         elif st.session_state.last_exit is not None:
-            status_placeholder.error(f"❌ Pipeline failed (exit code {st.session_state.last_exit}). See log above.")
+            # Show last error line from log for context
+            error_lines = [l for l in st.session_state.log_lines if 'error' in l.lower() or 'ERROR' in l]
+            hint = error_lines[-1] if error_lines else "Check logs for details."
+            status_placeholder.error(f"❌ Pipeline failed — {hint}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_config:
-    selected_config_edit = st.selectbox("Config file", configs, key="config_edit_sel")
+    selected_config_edit = selected_config
     paths = load_config(selected_config_edit)
 
     path_labels = {
@@ -347,7 +354,7 @@ with tab_config:
 # TAB 3 — SHOP MAPPING
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_mapping:
-    sel_cfg      = st.selectbox("Config file", configs, key="mapping_cfg")
+    sel_cfg      = selected_config
     paths        = load_config(sel_cfg)
     mapping_path = paths.get('shop_mapping', '')
 
@@ -395,7 +402,7 @@ with tab_mapping:
 # TAB 4 — SCHEMA
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_schema:
-    sel_cfg     = st.selectbox("Config file", configs, key="schema_cfg")
+    sel_cfg     = selected_config
     paths       = load_config(sel_cfg)
     schema_path = paths.get('schemas', '')
 
@@ -424,3 +431,159 @@ with tab_schema:
             sheets[selected_sheet] = edited_schema
             save_schemas(schema_path, sheets)
             st.success(f"✅ Saved schema for '{selected_sheet}'")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — INSIGHTS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_insights:
+    import json
+
+    sel_cfg      = st.selectbox("Config file", configs, key="insights_cfg")
+    paths        = load_config(sel_cfg)
+    combined_folder = paths.get('combined_data', '')
+    json_path    = os.path.join(combined_folder, 'insights.json') if combined_folder else ''
+
+    if not json_path or not Path(json_path).exists():
+        st.info("No insights found yet — run the pipeline first to generate analysis.")
+    else:
+        with open(json_path) as f:
+            ins = json.load(f)
+
+        # ── Month-on-month trends ─────────────────────────────────────────
+        st.markdown("### 📈 Month-on-Month Trends")
+        mom = ins.get('mom_trends', {})
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if mom.get('redemptions_by_month'):
+                df_r = pd.DataFrame(mom['redemptions_by_month'])
+                st.markdown("**Campaign Redemptions**")
+                st.bar_chart(df_r.set_index('month_year')['redemptions'])
+        with col2:
+            if mom.get('gto_by_month'):
+                df_g = pd.DataFrame(mom['gto_by_month'])
+                st.markdown("**GTO Revenue ($)**")
+                st.bar_chart(df_g.set_index('month_year')['total_gto_amount'])
+
+        if mom.get('redemptions_by_month'):
+            st.dataframe(pd.DataFrame(mom['redemptions_by_month']), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── Campaign ROI ──────────────────────────────────────────────────
+        st.markdown("### 💰 Campaign ROI")
+        roi = ins.get('campaign_roi', {})
+
+        if roi.get('summary'):
+            s = roi['summary']
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Avg ROI Ratio",        f"{s.get('avg_roi_ratio','—')}x")
+            c2.metric("Median ROI Ratio",     f"{s.get('median_roi_ratio','—')}x")
+            c3.metric("Total Vouchers ($)",   f"${s.get('total_voucher_redeemed',0):,.0f}")
+            c4.metric("Total GTO Revenue ($)",f"${s.get('total_gto_revenue',0):,.0f}")
+
+        if roi.get('monthly_roi'):
+            df_roi = pd.DataFrame(roi['monthly_roi'])
+            st.markdown("**ROI Ratio by Month**")
+            st.line_chart(df_roi.set_index('month_year')['roi_ratio'])
+
+        if roi.get('top_outlets_by_roi'):
+            st.markdown("**Top 10 Outlets by ROI**")
+            st.dataframe(pd.DataFrame(roi['top_outlets_by_roi']), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── Campaign type ─────────────────────────────────────────────────
+        st.markdown("### 🏷️ Brand-Funded vs Mall-Funded")
+        ct = ins.get('campaign_type', {})
+
+        if ct.get('by_funding_type'):
+            st.dataframe(pd.DataFrame(ct['by_funding_type']), use_container_width=True, hide_index=True)
+
+        if ct.get('gto_by_funding_type'):
+            df_ct = pd.DataFrame(ct['gto_by_funding_type'])
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**GTO Revenue by Funding Type**")
+                st.bar_chart(df_ct.set_index('funding_type')['total_gto_revenue'])
+            with col2:
+                st.markdown("**ROI Ratio by Funding Type**")
+                st.bar_chart(df_ct.set_index('funding_type')['roi_ratio'])
+
+        if ct.get('monthly_by_type'):
+            df_monthly = pd.DataFrame(ct['monthly_by_type'])
+            if 'funding_type' in df_monthly.columns:
+                pivoted = df_monthly.pivot(index='month_year', columns='funding_type', values='redemptions').fillna(0)
+                st.markdown("**Monthly Redemptions by Funding Type**")
+                st.bar_chart(pivoted)
+
+        st.markdown("---")
+
+        # ── Loyalty points ────────────────────────────────────────────────
+        st.markdown("### 💳 Loyalty Points Effectiveness")
+        loy = ins.get('loyalty_points', {})
+
+        if loy.get('correlations'):
+            c = loy['correlations']
+            col1, col2 = st.columns(2)
+            col1.metric("Points Earned vs GTO Revenue (correlation)", c.get('points_vs_gto_revenue', '—'))
+            col2.metric("Member Spend vs GTO Revenue (correlation)",  c.get('spend_vs_gto_revenue',  '—'))
+            st.caption("Correlation of 1.0 = perfect positive relationship, 0 = no relationship, -1 = inverse relationship")
+
+        if loy.get('top_outlets_by_points'):
+            st.markdown("**Top 10 Outlets by Points Earned**")
+            df_pts = pd.DataFrame(loy['top_outlets_by_points'])
+            st.bar_chart(df_pts.set_index('final_gto_name')['total_points'])
+            st.dataframe(df_pts, use_container_width=True, hide_index=True)
+
+        if loy.get('regression'):
+            reg = loy['regression']
+            if 'error' not in reg:
+                st.markdown(f"**Regression: what drives GTO revenue?** &nbsp; R² = `{reg.get('r_squared','—')}`")
+                coef_df = pd.DataFrame([
+                    {'variable': k, 'coefficient': v, 'p_value': reg['pvalues'].get(k,'—'),
+                     'significant': '✅' if k in reg.get('significant',[]) else ''}
+                    for k, v in reg.get('coefs',{}).items() if k != 'const'
+                ])
+                st.dataframe(coef_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+        # ── Tenant turnover ───────────────────────────────────────────────
+        st.markdown("### 🔄 Tenant Turnover")
+        tt = ins.get('tenant_turnover', {})
+
+        if tt.get('turnover_by_trade_type'):
+            df_tt = pd.DataFrame(tt['turnover_by_trade_type'])
+            st.markdown("**Turnover Rate by Trade Type**")
+            st.bar_chart(df_tt.set_index('ion_trade_type_name')['turnover_rate_pct'])
+            st.dataframe(df_tt, use_container_width=True, hide_index=True)
+
+        if tt.get('gto_stayed_vs_exited'):
+            sv = tt['gto_stayed_vs_exited']
+            st.markdown("**GTO Performance: Stayed vs Exited Tenants**")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Stayed**")
+                st.metric("Count",          sv['stayed'].get('count','—'))
+                st.metric("Avg GTO ($)",    f"${sv['stayed'].get('avg_gto_amount',0):,.0f}" if sv['stayed'].get('avg_gto_amount') else '—')
+                st.metric("Avg GTO Rent ($)",f"${sv['stayed'].get('avg_gto_rent',0):,.0f}" if sv['stayed'].get('avg_gto_rent') else '—')
+            with col2:
+                st.markdown("**Exited**")
+                st.metric("Count",          sv['exited'].get('count','—'))
+                st.metric("Avg GTO ($)",    f"${sv['exited'].get('avg_gto_amount',0):,.0f}" if sv['exited'].get('avg_gto_amount') else '—')
+                st.metric("Avg GTO Rent ($)",f"${sv['exited'].get('avg_gto_rent',0):,.0f}" if sv['exited'].get('avg_gto_rent') else '—')
+
+        # Download report
+        st.markdown("---")
+        report_path = os.path.join(combined_folder, 'insights_report.xlsx')
+        if Path(report_path).exists():
+            with open(report_path, 'rb') as fh:
+                st.download_button(
+                    "⬇️  Download Full Insights Report (.xlsx)",
+                    data=fh.read(),
+                    file_name='insights_report.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    type='primary'
+                )

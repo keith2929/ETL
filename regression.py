@@ -4,8 +4,12 @@ import statsmodels.api as sm
 import os
 import sys
 from scipy import stats
+import json
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
+
+POINTS_COST_SGD = 0.20  # cost per point issued (SGD)
 
 
 class MallLoyaltyAnalyzer:
@@ -31,6 +35,161 @@ class MallLoyaltyAnalyzer:
                     if 'date' in col.lower():
                         self.data[key][col] = pd.to_datetime(self.data[key][col], errors='coerce')
         return self.data
+
+
+
+# -----------------------------
+# Helper
+# -----------------------------
+def find_file(folder, keyword, ext='.xlsx'):
+    for f in os.listdir(folder):
+        if keyword in f.lower() and f.endswith(ext):
+            return os.path.join(folder, f)
+    return ''
+
+def month_order(s):
+    return pd.to_datetime(s, format='%b-%Y', errors='coerce')
+
+
+# -----------------------------
+# Analysis 1 — Month-on-month trends
+# -----------------------------
+def analyse_mom_trends(campaign, gto):
+    if campaign.empty or 'month_year' not in campaign.columns:
+        return pd.DataFrame()
+    mom = campaign.groupby('month_year').agg(
+        total_points_issued = ('points_earned',  'sum'),
+        total_txn_amount    = ('amount',         'sum'),
+        total_transactions  = ('receipt_no',     'nunique'),
+        campaign_cost_sgd   = ('points_earned',  lambda x: x.sum() * POINTS_COST_SGD),
+    ).reset_index()
+    if not gto.empty and 'month_year' in gto.columns:
+        gto_grp = gto.groupby('month_year').agg(
+            total_gto_amount=('gto_amount','sum'),
+            total_gto_rent  =('gto_rent',  'sum'),
+        ).reset_index()
+        mom = pd.merge(mom, gto_grp, on='month_year', how='outer').fillna(0)
+    mom['sort_key'] = month_order(mom['month_year'])
+    mom = mom.sort_values('sort_key').drop(columns='sort_key')
+    for col in ['total_gto_amount','total_points_issued','total_txn_amount']:
+        if col in mom.columns:
+            mom[f'{col}_mom_pct'] = mom[col].pct_change().mul(100).round(2)
+    return mom.fillna(0)
+
+
+# -----------------------------
+# Analysis 2 — Points effectiveness
+# -----------------------------
+def analyse_points_effectiveness(campaign, gto):
+    result = {'available': False}
+    if campaign.empty or gto.empty or 'month_year' not in campaign.columns:
+        return result
+    pts = campaign.groupby('month_year').agg(
+        points_issued=('points_earned','sum'),
+        txn_amount   =('amount',       'sum'),
+    ).reset_index()
+    gto_grp = gto.groupby('month_year').agg(gto_amount=('gto_amount','sum')).reset_index()
+    merged = pd.merge(pts, gto_grp, on='month_year').dropna()
+    if len(merged) < 4:
+        return result
+    X = sm.add_constant(merged['points_issued'])
+    model = sm.OLS(merged['gto_amount'], X).fit()
+    corr, pval = stats.pearsonr(merged['points_issued'], merged['gto_amount'])
+    direction = 'positive' if corr > 0 else 'negative'
+    strength  = 'strong' if abs(corr) > 0.7 else ('moderate' if abs(corr) > 0.4 else 'weak')
+    sig       = 'statistically significant' if pval < 0.05 else 'not statistically significant'
+    return {
+        'available':   True,
+        'r_squared':   round(model.rsquared, 4),
+        'coefficient': round(model.params.get('points_issued', 0), 4),
+        'p_value':     round(model.pvalues.get('points_issued', 1), 4),
+        'correlation': round(corr, 4),
+        'n_months':    len(merged),
+        'insight':     (f"There is a {strength} {direction} correlation (r={corr:.2f}) between "
+                        f"points issued and GTO, which is {sig} (p={pval:.3f}). "
+                        f"The model explains {model.rsquared*100:.1f}% of variance in GTO."),
+        'data':        merged.to_dict(orient='records'),
+    }
+
+
+# -----------------------------
+# Analysis 3 — Campaign ROI
+# -----------------------------
+def analyse_campaign_roi(campaign, gto):
+    if campaign.empty or 'month_year' not in campaign.columns:
+        return pd.DataFrame()
+    grp_cols = ['month_year','outlet_name'] if 'outlet_name' in campaign.columns else ['month_year']
+    roi = campaign.groupby(grp_cols).agg(
+        points_issued  =('points_earned','sum'),
+        txn_revenue    =('amount',       'sum'),
+        n_transactions =('receipt_no',   'nunique'),
+    ).reset_index()
+    roi['campaign_cost_sgd'] = roi['points_issued'] * POINTS_COST_SGD
+    if not gto.empty and 'month_year' in gto.columns:
+        merge_cols = [c for c in grp_cols if c in gto.columns]
+        gto_grp = gto.groupby(merge_cols).agg(gto_revenue=('gto_amount','sum')).reset_index()
+        roi = pd.merge(roi, gto_grp, on=merge_cols, how='left').fillna(0)
+        roi['roi_vs_gto'] = np.where(roi['campaign_cost_sgd'] > 0,
+            (roi['gto_revenue'] / roi['campaign_cost_sgd']).round(2), np.nan)
+    roi['roi_vs_txn'] = np.where(roi['campaign_cost_sgd'] > 0,
+        (roi['txn_revenue'] / roi['campaign_cost_sgd']).round(2), np.nan)
+    roi['sort_key'] = month_order(roi['month_year'])
+    return roi.sort_values('sort_key').drop(columns='sort_key').fillna(0)
+
+
+# -----------------------------
+# Analysis 4 — Brand vs mall funded
+# -----------------------------
+def analyse_brand_vs_mall(campaign):
+    if campaign.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    fund_col = next((c for c in ['campaign_source','campaign_type'] if c in campaign.columns), None)
+    if not fund_col:
+        return pd.DataFrame(), pd.DataFrame()
+    agg = {'points_issued': ('points_earned','sum'), 'txn_revenue': ('amount','sum'),
+           'n_transactions': ('receipt_no','nunique'), 'avg_points_per_txn': ('points_earned','mean'),
+           'avg_spend_per_txn': ('amount','mean')}
+    if 'outlet_name' in campaign.columns:
+        agg['n_outlets'] = ('outlet_name','nunique')
+    summary = campaign.groupby(fund_col).agg(**agg).reset_index()
+    summary['campaign_cost_sgd'] = summary['points_issued'] * POINTS_COST_SGD
+    summary['roi_vs_txn'] = np.where(summary['campaign_cost_sgd'] > 0,
+        (summary['txn_revenue'] / summary['campaign_cost_sgd']).round(2), np.nan)
+    summary = summary.rename(columns={fund_col: 'funding_type'})
+    monthly = campaign.groupby([fund_col,'month_year']).agg(
+        points_issued =('points_earned','sum'),
+        txn_revenue   =('amount',       'sum'),
+        n_transactions=('receipt_no',   'nunique'),
+    ).reset_index().rename(columns={fund_col: 'funding_type'})
+    monthly['campaign_cost_sgd'] = monthly['points_issued'] * POINTS_COST_SGD
+    monthly['sort_key'] = month_order(monthly['month_year'])
+    monthly = monthly.sort_values('sort_key').drop(columns='sort_key')
+    return summary, monthly
+
+
+# -----------------------------
+# Analysis 5 — Tenant turnover
+# -----------------------------
+def analyse_tenant_turnover(turnover, rent):
+    result = {'available': False}
+    if turnover.empty:
+        return result
+    result['available'] = True
+    trade_col = next((c for c in ['ion_trade_type_name','jv_sg_trade_type','trade_type'] if c in turnover.columns), None)
+    if trade_col:
+        by_trade = turnover.groupby(trade_col).agg(
+            n_tenants=('shop_name','nunique') if 'shop_name' in turnover.columns else ('lease_no','count'),
+        ).reset_index().rename(columns={trade_col:'trade_type'})
+        result['by_trade'] = by_trade.sort_values('n_tenants', ascending=False)
+    if not rent.empty and 'lease_status' in rent.columns:
+        result['lease_status'] = rent['lease_status'].value_counts().reset_index().rename(
+            columns={'lease_status':'lease_status','count':'count'})
+    if not rent.empty and all(c in rent.columns for c in ['gto_amount','nla_sqft','shop_name']):
+        eff = rent.groupby('shop_name').agg(total_gto=('gto_amount','sum'), avg_nla=('nla_sqft','mean')).reset_index()
+        eff = eff[eff['avg_nla'] > 0]
+        eff['gto_per_sqft'] = (eff['total_gto'] / eff['avg_nla']).round(2)
+        result['gto_per_sqft'] = eff.sort_values('gto_per_sqft', ascending=False)
+    return result
 
 
 # -----------------------------
@@ -151,6 +310,64 @@ if __name__ == "__main__":
 
     aggregated_data.to_excel(output_combined_file, index=False)
     print(f"✅ Saved: {output_combined_file}")
+
+    # ----------------------------
+    # Step 4: Business analysis + insights
+    # ----------------------------
+    print("\n📊 Step 4: Running business analysis...")
+
+    # Load GTO and turnover for analysis
+    gto_for_analysis      = pd.read_excel(gto_file)
+    turnover_file         = find_file(DATA_FOLDER, 'gto_tenant_turnover', '.xlsx') or                             find_file(DATA_FOLDER, 'gto_tenant_turnover', '.csv')
+    turnover_df           = pd.read_excel(turnover_file) if turnover_file and turnover_file.endswith('.xlsx')                             else (pd.read_csv(turnover_file) if turnover_file else pd.DataFrame())
+
+    if 'gto_reporting_month' in gto_for_analysis.columns:
+        gto_for_analysis['month_year'] = pd.to_datetime(
+            gto_for_analysis['gto_reporting_month'], errors='coerce'
+        ).dt.strftime('%b-%Y')
+
+    # Use the merged campaign data (has amount + points_earned from transaction)
+    combined_campaign_df = pd.read_excel(output_file)
+    # Re-attach month_year if dropped
+    if 'month_year' not in combined_campaign_df.columns and 'month_year' in campaign.columns:
+        combined_campaign_df['month_year'] = campaign['month_year'].values[:len(combined_campaign_df)]
+
+    mom_trends           = analyse_mom_trends(combined_campaign_df, gto_for_analysis)
+    points_eff           = analyse_points_effectiveness(combined_campaign_df, gto_for_analysis)
+    roi                  = analyse_campaign_roi(combined_campaign_df, gto_for_analysis)
+    brand_summary, brand_monthly = analyse_brand_vs_mall(combined_campaign_df)
+    turnover_res         = analyse_tenant_turnover(turnover_df, gto_for_analysis)
+
+    report_path = os.path.join(COMBINED_FOLDER, 'insights_report.xlsx')
+    with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
+        if not mom_trends.empty:
+            mom_trends.to_excel(writer, sheet_name='MoM_Trends', index=False)
+        if points_eff.get('available'):
+            pd.DataFrame([{k: v for k, v in points_eff.items() if k != 'data'}]).to_excel(
+                writer, sheet_name='Points_Effectiveness', index=False)
+            pd.DataFrame(points_eff['data']).to_excel(writer, sheet_name='Points_Data', index=False)
+        if not roi.empty:
+            roi.to_excel(writer, sheet_name='Campaign_ROI', index=False)
+        if not brand_summary.empty:
+            brand_summary.to_excel(writer, sheet_name='Brand_vs_Mall', index=False)
+            brand_monthly.to_excel(writer, sheet_name='Brand_vs_Mall_Monthly', index=False)
+        if turnover_res.get('available'):
+            for key, sheet in [('by_trade','Turnover_by_Trade'),('lease_status','Lease_Status'),('gto_per_sqft','GTO_per_sqft')]:
+                if key in turnover_res and not turnover_res[key].empty:
+                    turnover_res[key].to_excel(writer, sheet_name=sheet, index=False)
+
+    print(f"  ✅ Saved: {report_path}")
+
+    # Save summary JSON for Streamlit insights tab
+    json.dump({
+        'points_effectiveness': {k: v for k, v in points_eff.items() if k != 'data'},
+        'brand_mall_summary':   brand_summary.to_dict(orient='records') if not brand_summary.empty else [],
+        'roi_summary': {
+            'total_cost_sgd': float(roi['campaign_cost_sgd'].sum())  if not roi.empty else None,
+            'avg_roi_vs_txn': float(roi['roi_vs_txn'].mean())        if not roi.empty and 'roi_vs_txn' in roi.columns else None,
+            'avg_roi_vs_gto': float(roi['roi_vs_gto'].mean())        if not roi.empty and 'roi_vs_gto' in roi.columns else None,
+        },
+    }, open(os.path.join(COMBINED_FOLDER, 'insights.json'), 'w'), indent=2, default=str)
 
     print("\n" + "="*60)
     print("✅ REGRESSION COMPLETED — outputs saved to:")
