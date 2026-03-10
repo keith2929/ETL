@@ -327,6 +327,8 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3:
         DATA_FOLDER     = sys.argv[1]
         COMBINED_FOLDER = sys.argv[2]
+        # shop_mapping passed as optional 3rd arg from main.py
+        MAPPING_FILE    = sys.argv[3] if len(sys.argv) > 3 else ''
     else:
         _config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
         _script_dir  = Path(__file__).resolve().parent
@@ -334,6 +336,7 @@ if __name__ == "__main__":
         _config      = dict(zip(_paths_df['Setting'].astype(str).str.strip(), _paths_df['Value']))
         DATA_FOLDER     = str(_config.get('cleaned_data',  '')).strip()
         COMBINED_FOLDER = str(_config.get('combined_data', '')).strip()
+        MAPPING_FILE    = str(_config.get('shop_mapping',  '')).strip()
         print(f"📖 Loaded config from {_config_file}")
 
     print("\n" + "="*60)
@@ -382,6 +385,34 @@ if __name__ == "__main__":
 
     if 'month' in campaign.columns and 'year' in campaign.columns:
         campaign['month_year'] = campaign['month'].astype(str) + '-' + campaign['year'].astype(str)
+
+    # ----------------------------
+    # Filter campaign to matched shops only (exact, fuzzy, confirmed)
+    # Excludes unmatched outlets and gto_only rows from all downstream analysis
+    # ----------------------------
+    MATCHED_METHODS = {'exact', 'fuzzy', 'confirmed'}
+    if MAPPING_FILE and os.path.exists(MAPPING_FILE):
+        try:
+            mapping_df = pd.read_excel(MAPPING_FILE, sheet_name='mapping')
+            mapping_df['campaign_name'] = mapping_df['campaign_name'].astype(str).str.strip().str.lower()
+            mapping_df['method']        = mapping_df['method'].astype(str).str.strip().str.lower()
+            matched_names = set(
+                mapping_df.loc[mapping_df['method'].isin(MATCHED_METHODS), 'campaign_name']
+            )
+            if 'outlet_name' in campaign.columns:
+                before = len(campaign)
+                campaign = campaign[
+                    campaign['outlet_name'].str.strip().str.lower().isin(matched_names)
+                ].copy()
+                after = len(campaign)
+                print(f"✅ Filtered to matched shops only: {after:,} rows kept, "
+                      f"{before - after:,} unmatched rows excluded.")
+            else:
+                print("⚠️  outlet_name column not found in campaign — skipping match filter.")
+        except Exception as e:
+            print(f"⚠️  Could not load shop mapping for filtering: {e}")
+    else:
+        print("⚠️  shop_mapping not found — analysis includes all campaign rows.")
 
     if txn_file and os.path.exists(txn_file):
         transaction = pd.read_csv(txn_file)

@@ -14,8 +14,13 @@ Usage (client):
 """
 
 import os
-import subprocess
 import sys
+import subprocess
+import io
+
+# Force UTF-8 output so emoji from subprocesses display correctly on Windows
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 from pathlib import Path
 
 try:
@@ -76,7 +81,8 @@ def run_script(label: str, path: Path, args: list) -> bool:
         env=env
     )
     for line in process.stdout:
-        print(line, end='')
+        sys.stdout.buffer.write(line.encode('utf-8', errors='replace'))
+        sys.stdout.buffer.flush()
     process.wait()
 
     if process.returncode == 0:
@@ -119,7 +125,7 @@ if __name__ == "__main__":
     # Script definitions with the args each needs
     scripts_with_args = [
         ("Data Loader", SCRIPT_DIR / "data_loader.py", [raw_data, cleaned_data, schemas, shop_mapping, config_file]),
-        ("Regression",  SCRIPT_DIR / "regression.py",  [cleaned_data, combined_data]),
+        ("Regression",  SCRIPT_DIR / "regression.py",  [cleaned_data, combined_data, shop_mapping]),
     ]
 
     for label, script_path, args in scripts_with_args:
