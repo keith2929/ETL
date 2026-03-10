@@ -358,6 +358,41 @@ with tab_config:
         'shop_mapping':  'Shop Mapping File (.xlsx)',
     }
 
+    def open_in_explorer(path_str: str, select_file: bool = False):
+        """Open file explorer at the given path.
+        - Folders: open the folder directly (create if needed).
+        - Files: open the parent folder with the file selected (Windows) or just the folder (Mac).
+        - If path doesn't exist, walk up to the nearest existing ancestor.
+        """
+        p = Path(path_str.strip()) if path_str.strip() else None
+        if not p:
+            st.warning("No path entered.")
+            return
+        # For a file path, the target to highlight is the file; the folder to open is its parent
+        if select_file:
+            target = p
+            folder = p.parent
+        else:
+            target = p
+            folder = p
+        # Walk up to nearest existing ancestor
+        walk = folder
+        while walk != walk.parent and not walk.exists():
+            walk = walk.parent
+        if sys.platform == 'win32':
+            if select_file and target.exists():
+                # /select highlights the specific file in Explorer
+                subprocess.Popen(f'explorer /select,"{target}"')
+            else:
+                subprocess.Popen(f'explorer "{walk}"')
+        elif sys.platform == 'darwin':
+            if select_file and target.exists():
+                subprocess.Popen(['open', '-R', str(target)])
+            else:
+                subprocess.Popen(['open', str(walk)])
+        else:
+            subprocess.Popen(['xdg-open', str(walk)])
+
     new_paths = {}
     for key, label in path_labels.items():
         col_input, col_btn = st.columns([5, 1])
@@ -365,27 +400,15 @@ with tab_config:
             new_paths[key] = st.text_input(label, value=paths.get(key, ''), key=f"path_{key}")
         with col_btn:
             st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-            folder = new_paths[key]
-            # For folder paths, open in Explorer / Finder
-            if key in ('raw_data', 'cleaned_data', 'combined_data'):
-                if st.button("📂", key=f"open_{key}", help=f"Open {label} in file explorer"):
-                    if folder and Path(folder).exists():
-                        if sys.platform == 'win32':
-                            os.startfile(folder)
-                        else:
-                            subprocess.Popen(['open', folder])
-                    else:
-                        st.warning(f"Folder not found: {folder}")
-            # For file paths, open the file directly
-            else:
-                if st.button("📄", key=f"open_{key}", help=f"Open {label}"):
-                    if folder and Path(folder).exists():
-                        if sys.platform == 'win32':
-                            os.startfile(folder)
-                        else:
-                            subprocess.Popen(['open', folder])
-                    else:
-                        st.warning(f"File not found: {folder}")
+            target_path = new_paths[key]
+            is_file = key in ('schemas', 'shop_mapping')
+            icon    = "📄" if is_file else "📂"
+            tip     = f"Open {label} in file explorer"
+            if st.button(icon, key=f"open_{key}", help=tip):
+                if target_path.strip():
+                    open_in_explorer(target_path, select_file=is_file)
+                else:
+                    st.warning("Enter a path first.")
 
     st.markdown("---")
     st.markdown("#### GTO Header Rows")
