@@ -198,8 +198,38 @@ if not configs:
     st.error("No config_*.xlsx file found in the app folder.")
     st.stop()
 
-# Global config selector — applies to all tabs
-selected_config = st.selectbox("Config", configs, key="global_config", label_visibility="collapsed")
+# ── Config selector + new config inline ───────────────────────────────────────
+_NEW_LABEL = "＋  Add new config..."
+_col_sel, _col_new = st.columns([3, 2])
+
+with _col_sel:
+    _options = configs + [_NEW_LABEL]
+    _choice  = st.selectbox("Config", _options, key="global_config", label_visibility="collapsed")
+
+with _col_new:
+    if _choice == _NEW_LABEL:
+        _new_name = st.text_input(
+            "New config name", placeholder="e.g. Alice",
+            key="new_config_name", label_visibility="collapsed"
+        )
+    else:
+        st.empty()
+
+# Resolve which config is actually selected
+if _choice == _NEW_LABEL:
+    _raw = st.session_state.get("new_config_name", "").strip()
+    # Strip any accidental "config_" prefix and ".xlsx" suffix the user might type
+    _raw = _raw.removeprefix("config_").removesuffix(".xlsx")
+    selected_config = f"config_{_raw}.xlsx" if _raw else None
+    _is_new = True
+else:
+    selected_config = _choice
+    _is_new = False
+
+if selected_config is None:
+    st.info("Enter a name for your new config above, then fill in the paths in the ⚙ Config tab and click Save.")
+    st.stop()
+
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
 tab_run, tab_config, tab_mapping, tab_schema, tab_insights = st.tabs([
@@ -268,7 +298,37 @@ with tab_run:
 
         # Update log box in-place — no flicker since placeholder already exists
         if st.session_state.log_lines:
-            log_text = "\n".join(st.session_state.log_lines[-300:])
+            # Patterns to hide from the client-facing log — still printed to console
+            _hide = (
+                'DEBUG ',
+                'Loading configuration from',
+                'raw_data from config',
+                'cleaned_data from config',
+                'schemas from config',
+                'FutureWarning',
+                'DeprecationWarning',
+                'UserWarning',
+                'warnings.warn',
+                '✓ Loaded:',
+                '🗑 Deleted',
+                '✅ Exported',
+                '✅ Loaded shop_mapping',
+                '✅ Loaded ', '✅ Successfully loaded paths',
+                'GTO header configurations',
+                '📁 Raw data path',
+                '📁 Output path',
+                '📁 Schema file',
+                '📁 Cleaned data',
+                '📁 Combined data',
+                '📖 Loaded config',
+                '   - gto/',
+                '   - cat/',
+            )
+            visible_lines = [
+                l for l in st.session_state.log_lines[-300:]
+                if not any(pat in l for pat in _hide)
+            ]
+            log_text = "\n".join(visible_lines)
             log_placeholder.markdown(
                 f'<div class="log-box">{log_text}</div>',
                 unsafe_allow_html=True
@@ -284,8 +344,11 @@ with tab_run:
 # TAB 2 — CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_config:
-    selected_config_edit = selected_config
-    paths = load_config(selected_config_edit)
+    # For a new config, start with empty paths; for existing, load from file
+    paths = load_config(selected_config) if not _is_new else {}
+
+    if _is_new:
+        st.info(f"Creating new config: **{selected_config}** — fill in the paths below and click Save.")
 
     path_labels = {
         'raw_data':      'Raw Data Folder',
@@ -329,7 +392,7 @@ with tab_config:
     st.caption("Row number where column headers start in each GTO file (1-indexed)")
 
     try:
-        gto_df = pd.read_excel(APP_DIR / selected_config_edit, sheet_name='gto_headers')
+        gto_df = pd.read_excel(APP_DIR / selected_config, sheet_name='gto_headers')
     except:
         gto_df = pd.DataFrame([
             {'category': 'gto', 'dataset': 'monthly_sales',   'header_row': 7},
@@ -357,10 +420,12 @@ with tab_config:
             for _, row in gto_df.iterrows()
         ]
         paths_df = pd.DataFrame([{'Setting': k, 'Value': v} for k, v in new_paths.items()])
-        with pd.ExcelWriter(APP_DIR / selected_config_edit, engine='openpyxl') as writer:
+        with pd.ExcelWriter(APP_DIR / selected_config, engine='openpyxl') as writer:
             paths_df.to_excel(writer, sheet_name='paths', index=False)
             pd.DataFrame(new_gto_rows).to_excel(writer, sheet_name='gto_headers', index=False)
-        st.success(f"✅ Saved {selected_config_edit}")
+        st.success(f"✅ Saved {selected_config}")
+        if _is_new:
+            st.rerun()  # refresh so new config appears in the dropdown
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
