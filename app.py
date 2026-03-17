@@ -435,6 +435,61 @@ with tab_config:
                 key=f"gto_{k}"
             )
 
+    st.markdown("---")
+    st.markdown("#### 🧹 Data Cleaning")
+    st.caption("Controls how blanks and outliers are handled when the pipeline runs")
+
+    _BLANK_NUM_OPTS    = ['zero', 'mean', 'median', 'drop_row']
+    _BLANK_STR_OPTS    = ['empty', 'drop_row']
+    _OUTLIER_METH_OPTS = ['none', 'iqr', 'zscore', 'winsorise']
+    _OUTLIER_ACT_OPTS  = ['cap', 'drop_row']
+
+    try:
+        _clean_df  = pd.read_excel(APP_DIR / selected_config, sheet_name='data_cleaning')
+        _clean_cfg = dict(zip(_clean_df['Setting'].astype(str).str.strip().str.lower().str.replace(' ','_'),
+                              _clean_df['Value'].astype(str).str.strip().str.lower()))
+    except Exception:
+        _clean_cfg = {}
+
+    def _idx(opts, key, default):
+        val = _clean_cfg.get(key, default)
+        return opts.index(val) if val in opts else opts.index(default)
+
+    cl1, cl2 = st.columns(2)
+    with cl1:
+        blank_numeric  = st.selectbox("Blank numeric cells",  _BLANK_NUM_OPTS,
+                                      index=_idx(_BLANK_NUM_OPTS,  'blank_numeric',  'zero'),   key='cl_blank_num')
+        blank_string   = st.selectbox("Blank text cells",     _BLANK_STR_OPTS,
+                                      index=_idx(_BLANK_STR_OPTS,  'blank_string',   'empty'),  key='cl_blank_str')
+    with cl2:
+        outlier_method = st.selectbox("Outlier detection",    _OUTLIER_METH_OPTS,
+                                      index=_idx(_OUTLIER_METH_OPTS,'outlier_method', 'none'),  key='cl_out_meth')
+        outlier_action = st.selectbox("Outlier action",       _OUTLIER_ACT_OPTS,
+                                      index=_idx(_OUTLIER_ACT_OPTS, 'outlier_action', 'cap'),   key='cl_out_act')
+
+    _thresh_default = float(_clean_cfg.get('outlier_threshold', '1.5') or '1.5')
+    outlier_threshold = st.number_input(
+        "Outlier threshold  (IQR multiplier · Z-score cutoff · Winsorise percentile)",
+        min_value=0.1, max_value=10.0, value=_thresh_default, step=0.1,
+        key='cl_threshold',
+        help="IQR: typical value 1.5 (mild) or 3.0 (extreme)  |  Z-score: typical 2.0–3.0  |  Winsorise: percentile e.g. 1.5 caps at 1.5th and 98.5th"
+    )
+
+    # Descriptions shown inline
+    _desc = {
+        'zero':       "Fill blank numbers with 0",
+        'mean':       "Fill blank numbers with the column mean",
+        'median':     "Fill blank numbers with the column median",
+        'drop_row':   "Drop any row that contains a blank",
+        'empty':      "Fill blank text with an empty string",
+        'none':       "No outlier detection — keep all values",
+        'iqr':        "Flag values outside Q1 − k×IQR … Q3 + k×IQR",
+        'zscore':     "Flag values where |z-score| > threshold",
+        'winsorise':  "Cap at the threshold-th and (100−threshold)-th percentile",
+        'cap':        "Replace outliers with the boundary value",
+    }
+    st.caption(f"ℹ️  Blanks: {_desc.get(blank_numeric,'')}. Outliers: {_desc.get(outlier_method,'')} → {_desc.get(outlier_action,'')}.")
+
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
     if st.button("💾  Save Config", type="primary"):
         new_gto_rows = [
@@ -442,13 +497,21 @@ with tab_config:
              'header_row': gto_vals[f"{row['category']}_{row['dataset']}"]}
             for _, row in gto_df.iterrows()
         ]
+        cleaning_rows = [
+            {'Setting': 'blank_numeric',     'Value': blank_numeric},
+            {'Setting': 'blank_string',      'Value': blank_string},
+            {'Setting': 'outlier_method',    'Value': outlier_method},
+            {'Setting': 'outlier_action',    'Value': outlier_action},
+            {'Setting': 'outlier_threshold', 'Value': outlier_threshold},
+        ]
         paths_df = pd.DataFrame([{'Setting': k, 'Value': v} for k, v in new_paths.items()])
         with pd.ExcelWriter(APP_DIR / selected_config, engine='openpyxl') as writer:
             paths_df.to_excel(writer, sheet_name='paths', index=False)
             pd.DataFrame(new_gto_rows).to_excel(writer, sheet_name='gto_headers', index=False)
+            pd.DataFrame(cleaning_rows).to_excel(writer, sheet_name='data_cleaning', index=False)
         st.success(f"✅ Saved {selected_config}")
         if _is_new:
-            st.rerun()  # refresh so new config appears in the dropdown
+            st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings('ignore')
+
 import pandas as pd
 import glob
 import os
@@ -278,7 +281,130 @@ def load_excel_files(folder_path, header_rows_config, default_sheet="Sheet1"):
 # -----------------------------
 # Merge Datasets (optimized for redemptions)
 # -----------------------------
-def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset", add_month_year=True, extra_columns=None):
+# -----------------------------
+# Cleaning Configuration
+# -----------------------------
+DEFAULT_CLEANING_CONFIG = {
+    'blank_numeric':     'zero',        # zero | drop_row | mean | median
+    'blank_string':      'empty',       # empty | drop_row
+    'outlier_method':    'none',        # none | iqr | zscore | winsorise
+    'outlier_action':    'cap',         # cap | drop_row
+    'outlier_threshold': 1.5,           # IQR multiplier or Z-score cutoff
+    'apply_to':          'numeric',     # numeric | all
+}
+
+def load_cleaning_config(config_file: str) -> dict:
+    """Load data_cleaning sheet from config. Falls back to defaults if sheet absent."""
+    cfg = DEFAULT_CLEANING_CONFIG.copy()
+    try:
+        df = pd.read_excel(config_file, sheet_name='data_cleaning')
+        if 'Setting' in df.columns and 'Value' in df.columns:
+            for _, row in df.iterrows():
+                key = str(row['Setting']).strip().lower().replace(' ', '_')
+                val = str(row['Value']).strip().lower()
+                if key in cfg:
+                    # Cast numeric threshold back to float
+                    if key == 'outlier_threshold':
+                        try:
+                            cfg[key] = float(val)
+                        except ValueError:
+                            pass
+                    else:
+                        cfg[key] = val
+    except Exception:
+        pass  # sheet not present — use defaults
+    return cfg
+
+
+def apply_cleaning(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Apply blank-filling and outlier handling to a DataFrame according to cfg.
+
+    blank_numeric  : zero        → fill NaN with 0
+                     mean        → fill NaN with column mean
+                     median      → fill NaN with column median
+                     drop_row    → drop rows where any numeric col is NaN
+
+    blank_string   : empty       → fill NaN with ''
+                     drop_row    → drop rows where any string col is NaN
+
+    outlier_method : none        → skip
+                     iqr         → flag outliers using IQR × threshold
+                     zscore      → flag outliers using |z| > threshold
+                     winsorise   → cap at [threshold-th percentile, (100-threshold)-th percentile]
+
+    outlier_action : cap         → replace outlier with boundary value (winsorise / IQR fence / z-fence)
+                     drop_row    → drop rows containing outliers
+    """
+    df = df.copy()
+    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    str_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+
+    # ── Blank handling ────────────────────────────────────────────────────────
+    blank_num = cfg.get('blank_numeric', 'zero')
+    if blank_num == 'zero':
+        df[num_cols] = df[num_cols].fillna(0)
+    elif blank_num == 'mean':
+        for c in num_cols:
+            df[c] = df[c].fillna(df[c].mean())
+    elif blank_num == 'median':
+        for c in num_cols:
+            df[c] = df[c].fillna(df[c].median())
+    elif blank_num == 'drop_row':
+        df = df.dropna(subset=num_cols)
+
+    blank_str = cfg.get('blank_string', 'empty')
+    if blank_str == 'drop_row':
+        df = df.dropna(subset=str_cols)
+    else:
+        for c in str_cols:
+            df[c] = df[c].fillna('').astype(str).str.strip()
+
+    # ── Outlier handling ──────────────────────────────────────────────────────
+    method    = cfg.get('outlier_method', 'none')
+    action    = cfg.get('outlier_action', 'cap')
+    threshold = float(cfg.get('outlier_threshold', 1.5))
+
+    if method == 'none' or not num_cols:
+        return df
+
+    outlier_mask = pd.DataFrame(False, index=df.index, columns=num_cols)
+
+    if method == 'iqr':
+        for c in num_cols:
+            q1, q3 = df[c].quantile(0.25), df[c].quantile(0.75)
+            iqr    = q3 - q1
+            lo, hi = q1 - threshold * iqr, q3 + threshold * iqr
+            outlier_mask[c] = (df[c] < lo) | (df[c] > hi)
+            if action == 'cap':
+                df[c] = df[c].clip(lower=lo, upper=hi)
+
+    elif method == 'zscore':
+        for c in num_cols:
+            z      = (df[c] - df[c].mean()) / df[c].std(ddof=0).replace(0, 1)
+            lo_val = df[c].mean() - threshold * df[c].std(ddof=0)
+            hi_val = df[c].mean() + threshold * df[c].std(ddof=0)
+            outlier_mask[c] = z.abs() > threshold
+            if action == 'cap':
+                df[c] = df[c].clip(lower=lo_val, upper=hi_val)
+
+    elif method == 'winsorise':
+        pct_lo = threshold          # e.g. 1.5 → 1.5th percentile
+        pct_hi = 100 - threshold
+        for c in num_cols:
+            lo = df[c].quantile(pct_lo / 100)
+            hi = df[c].quantile(pct_hi / 100)
+            outlier_mask[c] = (df[c] < lo) | (df[c] > hi)
+            df[c] = df[c].clip(lower=lo, upper=hi)
+
+    if action == 'drop_row':
+        rows_with_outliers = outlier_mask.any(axis=1)
+        df = df[~rows_with_outliers]
+
+    return df
+
+
+def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset", add_month_year=True, extra_columns=None, cleaning_config=None):
     dfs = []
     years = sorted(dataset_dict.keys())
 
@@ -296,7 +422,11 @@ def merge_dataset_dynamic(dataset_dict, schema_map, dataset_base_name="Dataset",
         dfs.append(df)
 
     merged_df = pd.concat(dfs, ignore_index=True)
-    df_name = f"{dataset_base_name}_{years[0]}_to_{years[-1]}"
+
+    # Apply cleaning rules from config (blanks + outliers)
+    merged_df = apply_cleaning(merged_df, cleaning_config or DEFAULT_CLEANING_CONFIG)
+
+    df_name = dataset_base_name
     return df_name, merged_df
 
 # -----------------------------
@@ -502,16 +632,24 @@ if __name__ == "__main__":
     # Load schemas from Excel
     SCHEMAS = load_schemas_from_excel(schema_file)
     print(f"✅ Loaded {len(SCHEMAS)} schema definitions")
-    
+
+    # Load cleaning config from the config file
+    CLEANING = load_cleaning_config(config_file if len(sys.argv) >= 5 else
+                                    str(Path(__file__).resolve().parent / config_file))
+    print(f"🧹 Cleaning — blanks(numeric): {CLEANING['blank_numeric']}  "
+          f"blanks(text): {CLEANING['blank_string']}  "
+          f"outliers: {CLEANING['outlier_method']} / {CLEANING['outlier_action']} "
+          f"(threshold: {CLEANING['outlier_threshold']})")
+
     # Load all Excel datasets using configurable header rows
     data = load_excel_files(file_path, header_rows_config)
-    
+
     merged_data = {}
     campaign_dfs = []
 
     for category in data:
         for dataset in data[category]:
-            dataset_name = f"{category}_{dataset}"  # match your Excel sheet names
+            dataset_name = f"{category}_{dataset}"
             schema = SCHEMAS.get(dataset_name, {})
 
             if (category, dataset) in [("mall", "campaign"), ("brand", "rewards")]:
@@ -522,14 +660,16 @@ if __name__ == "__main__":
                     extra_columns={
                         "campaign_source": dataset_name,
                         "campaign_type": category
-                    }
+                    },
+                    cleaning_config=CLEANING,
                 )
                 campaign_dfs.append(df)
             else:
                 df_name, df = merge_dataset_dynamic(
                     data[category][dataset],
                     schema_map=schema,
-                    dataset_base_name=dataset_name
+                    dataset_base_name=dataset_name,
+                    cleaning_config=CLEANING,
                 )
                 merged_data[df_name] = df
 
