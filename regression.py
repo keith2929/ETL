@@ -343,14 +343,17 @@ def analyse_time_series(campaign, gto):
     MIN_OBS = 6   # minimum months needed for any analysis
     MIN_DECOMP = 12  # minimum months for seasonal decomposition
 
-    def build_monthly_series(df, value_col, date_col='month_year'):
+    def build_monthly_series(df, value_col, date_col='month_year', agg='sum'):
         if df.empty or value_col not in df.columns or date_col not in df.columns:
             return pd.Series(dtype=float)
-        grp = df.groupby(date_col)[value_col].sum().reset_index()
+        if agg == 'nunique':
+            grp = df.groupby(date_col)[value_col].nunique().reset_index()
+        else:
+            grp = df.groupby(date_col)[value_col].sum().reset_index()
         grp['_dt'] = pd.to_datetime(grp[date_col], format='%b-%Y', errors='coerce')
         grp = grp.dropna(subset=['_dt']).sort_values('_dt').set_index('_dt')[value_col]
         grp.index = pd.DatetimeIndex(grp.index).to_period('M').to_timestamp()
-        return grp
+        return grp.astype(float)  # ensure numeric
 
     def linear_trend(series):
         x = np.arange(len(series))
@@ -461,11 +464,14 @@ def analyse_time_series(campaign, gto):
         out['forecast'] = forecast_series(series)
         return out
 
-    # Build series
-    gto_series      = build_monthly_series(gto,      'gto_amount')
-    campaign_series = build_monthly_series(campaign,  'receipt_no') \
-        if 'receipt_no' in campaign.columns else \
-        build_monthly_series(campaign, 'amount')
+    # Build series — count unique receipts as proxy for campaign activity volume
+    gto_series      = build_monthly_series(gto, 'gto_amount')
+    if 'receipt_no' in campaign.columns:
+        campaign_series = build_monthly_series(campaign, 'receipt_no', agg='nunique')
+    elif 'amount' in campaign.columns:
+        campaign_series = build_monthly_series(campaign, 'amount')
+    else:
+        campaign_series = pd.Series(dtype=float)
 
     if not gto_series.empty:
         result['gto_trend'] = analyse_series(gto_series, 'GTO Revenue')
