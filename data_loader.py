@@ -14,7 +14,7 @@ from pathlib import Path
 # -----------------------------
 # Configuration Loader
 # -----------------------------
-def load_configuration(config_file="config_Keith.xlsx"):
+def load_configuration(config_file="config_Kim.xlsx"):
     """
     Load configuration from config.xlsx
     Returns: (file_path, output_path, schema_file, header_rows, using_config)
@@ -601,10 +601,10 @@ if __name__ == "__main__":
         output_path  = sys.argv[2]
         schema_file  = sys.argv[3]
         mapping_file = sys.argv[4]
-        config_file  = sys.argv[5] if len(sys.argv) > 5 else "config_Keith.xlsx"
+        config_file  = sys.argv[5] if len(sys.argv) > 5 else "config_Kim.xlsx"
         _, _, _, header_rows_config, _ = load_configuration(config_file)
     else:
-        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
+        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Kim.xlsx"
         file_path, output_path, schema_file, header_rows_config, _ = load_configuration(config_file)
         _paths_df    = pd.read_excel(Path(__file__).resolve().parent / config_file, sheet_name='paths')
         _config      = dict(zip(_paths_df['Setting'].astype(str).str.strip(), _paths_df['Value']))
