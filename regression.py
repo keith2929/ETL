@@ -524,7 +524,7 @@ if __name__ == "__main__":
         # shop_mapping passed as optional 3rd arg from main.py
         MAPPING_FILE    = sys.argv[3] if len(sys.argv) > 3 else ''
     else:
-        _config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
+        _config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Kim.xlsx"
         _script_dir  = Path(__file__).resolve().parent
         _paths_df    = pd.read_excel(_script_dir / _config_file, sheet_name='paths')
         _config      = dict(zip(_paths_df['Setting'].astype(str).str.strip(), _paths_df['Value']))
