@@ -320,6 +320,194 @@ def analyse_tenant_turnover(turnover, gto):
     return result
 
 
+
+# -----------------------------
+# Analysis 6 — Time series
+# Keys: time_series.gto_trend, time_series.campaign_trend,
+#        time_series.forecast, time_series.anomalies, time_series.summary
+# -----------------------------
+def analyse_time_series(campaign, gto):
+    """
+    Runs time-series analysis on monthly GTO revenue and campaign redemptions:
+      - Trend decomposition (trend / seasonal / residual)
+      - 3-month simple moving average
+      - Linear trend (slope, direction, strength)
+      - 3-month ahead forecast (Holt-Winters exponential smoothing if ≥12 pts,
+        else linear extrapolation)
+      - Anomaly detection (residuals > 2 std dev flagged)
+    """
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+    from statsmodels.tsa.seasonal import seasonal_decompose
+
+    result = {}
+    MIN_OBS = 6   # minimum months needed for any analysis
+    MIN_DECOMP = 12  # minimum months for seasonal decomposition
+
+    def build_monthly_series(df, value_col, date_col='month_year'):
+        if df.empty or value_col not in df.columns or date_col not in df.columns:
+            return pd.Series(dtype=float)
+        grp = df.groupby(date_col)[value_col].sum().reset_index()
+        grp['_dt'] = pd.to_datetime(grp[date_col], format='%b-%Y', errors='coerce')
+        grp = grp.dropna(subset=['_dt']).sort_values('_dt').set_index('_dt')[value_col]
+        grp.index = pd.DatetimeIndex(grp.index).to_period('M').to_timestamp()
+        return grp
+
+    def linear_trend(series):
+        x = np.arange(len(series))
+        slope, intercept, r, p, _ = stats.linregress(x, series.values)
+        direction = 'upward' if slope > 0 else 'downward'
+        strength  = 'strong' if abs(r) > 0.7 else ('moderate' if abs(r) > 0.4 else 'weak')
+        return {
+            'slope':      safe_float(slope),
+            'r_squared':  safe_float(r**2),
+            'p_value':    safe_float(p),
+            'direction':  direction,
+            'strength':   strength,
+            'significant': bool(p < 0.05),
+        }
+
+    def moving_average(series, window=3):
+        ma = series.rolling(window, min_periods=1).mean().round(2)
+        return [{'month_year': str(k.strftime('%b-%Y')), 'value': safe_float(v)}
+                for k, v in ma.items()]
+
+    def detect_anomalies(series, residuals):
+        threshold = 2.0
+        std = residuals.std()
+        mean = residuals.mean()
+        anomalies = []
+        for dt, res in residuals.items():
+            if abs(res - mean) > threshold * std:
+                anomalies.append({
+                    'month_year': str(dt.strftime('%b-%Y')),
+                    'actual':     safe_float(series.get(dt, None)),
+                    'residual':   safe_float(res),
+                    'direction':  'above' if res > mean else 'below',
+                })
+        return anomalies
+
+    def forecast_series(series, steps=3):
+        forecasts = []
+        try:
+            if len(series) >= MIN_DECOMP:
+                model = ExponentialSmoothing(
+                    series, trend='add', seasonal='add', seasonal_periods=12
+                ).fit(optimized=True)
+            else:
+                model = ExponentialSmoothing(
+                    series, trend='add', seasonal=None
+                ).fit(optimized=True)
+            pred = model.forecast(steps)
+            last_dt = series.index[-1]
+            for i, val in enumerate(pred):
+                fdt = last_dt + pd.DateOffset(months=i+1)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast':   safe_float(val),
+                    'type':       'forecast',
+                })
+        except Exception as e:
+            # Fallback: linear extrapolation
+            trend = linear_trend(series)
+            last_val = float(series.iloc[-1])
+            slope    = trend['slope'] or 0
+            last_dt  = series.index[-1]
+            for i in range(1, steps + 1):
+                fdt = last_dt + pd.DateOffset(months=i)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast':   safe_float(last_val + slope * i),
+                    'type':       'linear_extrapolation',
+                })
+        return forecasts
+
+    def analyse_series(series, label):
+        out = {'label': label, 'n_months': int(len(series))}
+        if len(series) < MIN_OBS:
+            out['error'] = f'Not enough data ({len(series)} months, need {MIN_OBS})'
+            return out
+
+        out['trend']          = linear_trend(series)
+        out['moving_average'] = moving_average(series)
+        out['actual']         = [{'month_year': k.strftime('%b-%Y'), 'value': safe_float(v)}
+                                  for k, v in series.items()]
+
+        # Decomposition — only if enough observations
+        residuals = pd.Series(dtype=float)
+        if len(series) >= MIN_DECOMP:
+            try:
+                decomp = seasonal_decompose(series, model='additive', period=12, extrapolate_trend='freq')
+                out['decomposition'] = {
+                    'trend':    [{'month_year': k.strftime('%b-%Y'), 'value': safe_float(v)}
+                                  for k, v in decomp.trend.dropna().items()],
+                    'seasonal': [{'month_year': k.strftime('%b-%Y'), 'value': safe_float(v)}
+                                  for k, v in decomp.seasonal.dropna().items()],
+                    'residual': [{'month_year': k.strftime('%b-%Y'), 'value': safe_float(v)}
+                                  for k, v in decomp.resid.dropna().items()],
+                }
+                residuals = decomp.resid.dropna()
+            except Exception:
+                pass
+        else:
+            # Use residuals from linear detrending instead
+            x = np.arange(len(series))
+            slope, intercept, *_ = stats.linregress(x, series.values)
+            fitted    = pd.Series(intercept + slope * x, index=series.index)
+            residuals = series - fitted
+
+        if not residuals.empty:
+            out['anomalies'] = detect_anomalies(series, residuals)
+
+        out['forecast'] = forecast_series(series)
+        return out
+
+    # Build series
+    gto_series      = build_monthly_series(gto,      'gto_amount')
+    campaign_series = build_monthly_series(campaign,  'receipt_no') \
+        if 'receipt_no' in campaign.columns else \
+        build_monthly_series(campaign, 'amount')
+
+    if not gto_series.empty:
+        result['gto_trend'] = analyse_series(gto_series, 'GTO Revenue')
+
+    if not campaign_series.empty:
+        result['campaign_trend'] = analyse_series(campaign_series, 'Campaign Activity')
+
+    # Cross-series: lead-lag correlation (does campaign activity lead GTO by 1-2 months?)
+    if len(gto_series) >= MIN_OBS and len(campaign_series) >= MIN_OBS:
+        combined = pd.DataFrame({'gto': gto_series, 'campaign': campaign_series}).dropna()
+        if len(combined) >= MIN_OBS:
+            lead_lag = {}
+            for lag in range(0, 4):
+                shifted = combined['campaign'].shift(lag)
+                valid   = pd.concat([shifted, combined['gto']], axis=1).dropna()
+                if len(valid) >= 4:
+                    c, p = stats.pearsonr(valid.iloc[:, 0], valid.iloc[:, 1])
+                    lead_lag[f'lag_{lag}'] = {
+                        'correlation': safe_float(c),
+                        'p_value':     safe_float(p),
+                        'significant': bool(p < 0.05),
+                        'label':       f'Campaign → GTO ({lag} month lag)',
+                    }
+            result['lead_lag'] = lead_lag
+
+            # Best lag
+            best = max(lead_lag.items(),
+                       key=lambda x: abs(x[1]['correlation'] or 0))
+            result['summary'] = {
+                'best_lag':          best[0],
+                'best_correlation':  best[1]['correlation'],
+                'interpretation': (
+                    f"Campaign activity best predicts GTO revenue at a "
+                    f"{best[0].replace('lag_', '')}-month lag "
+                    f"(r={best[1]['correlation']:.2f}, "
+                    f"{'significant' if best[1]['significant'] else 'not significant'})."
+                ),
+            }
+
+    return result
+
+
 # -----------------------------
 # Main Execution
 # -----------------------------
@@ -500,6 +688,7 @@ if __name__ == "__main__":
     type_results     = analyse_campaign_type(cdf, gto_analysis)
     loyalty_results  = analyse_loyalty_points(cdf, gto_analysis)
     turnover_results = analyse_tenant_turnover(turnover_df, gto_analysis)
+    ts_results       = analyse_time_series(cdf, gto_analysis)
 
     # ----------------------------
     # Step 5: Save insights_report.xlsx
@@ -517,6 +706,9 @@ if __name__ == "__main__":
             ('Brand_vs_Mall_MoM',  type_results.get('monthly_by_type')),
             ('Top_Points_Outlets', loyalty_results.get('top_outlets_by_points')),
             ('Turnover_by_Trade',  turnover_results.get('turnover_by_trade_type')),
+            ('TS_GTO_Forecast',    ts_results.get('gto_trend', {}).get('forecast')),
+            ('TS_Campaign_Forecast', ts_results.get('campaign_trend', {}).get('forecast')),
+            ('TS_Anomalies_GTO',   ts_results.get('gto_trend', {}).get('anomalies')),
         ]
         for sheet_name, records in sheets:
             if records:
@@ -527,11 +719,12 @@ if __name__ == "__main__":
     # Step 6: Save insights.json — keys MUST match app.py tab_insights expectations
     # ----------------------------
     insights_payload = {
-        'mom_trends':      mom_results,       # app reads: .redemptions_by_month, .gto_by_month
-        'campaign_roi':    roi_results,       # app reads: .summary, .monthly_roi, .top_outlets_by_roi
-        'campaign_type':   type_results,      # app reads: .by_funding_type, .gto_by_funding_type, .monthly_by_type
-        'loyalty_points':  loyalty_results,   # app reads: .correlations, .top_outlets_by_points, .regression
-        'tenant_turnover': turnover_results,  # app reads: .turnover_by_trade_type, .gto_stayed_vs_exited
+        'mom_trends':      mom_results,
+        'campaign_roi':    roi_results,
+        'campaign_type':   type_results,
+        'loyalty_points':  loyalty_results,
+        'tenant_turnover': turnover_results,
+        'time_series':     ts_results,       # keys: gto_trend, campaign_trend, lead_lag, summary
     }
 
     json_path = os.path.join(COMBINED_FOLDER, 'insights.json')
