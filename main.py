@@ -44,7 +44,7 @@ SCRIPTS = [
     ("Regression",  SCRIPT_DIR / "regression.py"),
 ]
 
-DEFAULT_CONFIG = "config_Keith.xlsx"
+DEFAULT_CONFIG = "config_Kim.xlsx"
 
 
 def load_config_paths(config_file: str) -> dict:
