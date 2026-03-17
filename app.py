@@ -232,8 +232,8 @@ if selected_config is None:
 
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-tab_run, tab_config, tab_mapping, tab_schema, tab_insights = st.tabs([
-    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA", "📊  INSIGHTS"
+tab_run, tab_config, tab_mapping, tab_schema, tab_insights, tab_ts = st.tabs([
+    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA", "📊  INSIGHTS", "📈  TIME SERIES"
 ])
 
 
@@ -712,3 +712,144 @@ with tab_insights:
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     type='primary'
                 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — TIME SERIES
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_ts:
+    paths_ts        = load_config(selected_config)
+    combined_folder_ts = paths_ts.get('combined_data', '')
+    json_path_ts    = os.path.join(combined_folder_ts, 'insights.json') if combined_folder_ts else ''
+
+    if not json_path_ts or not Path(json_path_ts).exists():
+        st.info("No time series data yet — run the pipeline first.")
+    else:
+        with open(json_path_ts) as f:
+            ts_ins = json.load(f)
+
+        ts = ts_ins.get('time_series', {})
+
+        if not ts:
+            st.info("No time series results found — re-run the pipeline to generate them.")
+        else:
+            # ── Summary interpretation ───────────────────────────────────
+            if ts.get('summary'):
+                s = ts['summary']
+                st.info(f"🔍 {s.get('interpretation', '')}")
+
+            # ── GTO Revenue trend ─────────────────────────────────────────
+            st.markdown("### 📉 GTO Revenue — Trend & Forecast")
+            gto_ts = ts.get('gto_trend', {})
+
+            if gto_ts.get('error'):
+                st.warning(gto_ts['error'])
+            elif gto_ts.get('actual'):
+                # Combine actual + forecast into one chart
+                df_actual   = pd.DataFrame(gto_ts['actual']).rename(columns={'value': 'Actual GTO'})
+                df_forecast = pd.DataFrame(gto_ts.get('forecast', [])).rename(columns={'forecast': 'Forecast'})
+
+                df_chart = df_actual.set_index('month_year')[['Actual GTO']]
+                if not df_forecast.empty:
+                    df_chart = df_chart.join(
+                        df_forecast.set_index('month_year')[['Forecast']], how='outer'
+                    )
+                st.line_chart(df_chart)
+
+                # Trend stats
+                trend = gto_ts.get('trend', {})
+                if trend:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Trend Direction", trend.get('direction', '—').title())
+                    c2.metric("Trend Strength",  trend.get('strength',  '—').title())
+                    c3.metric("R²",              f"{trend.get('r_squared') or 0:.3f}")
+                    if trend.get('significant'):
+                        st.caption("✅ Trend is statistically significant (p < 0.05)")
+                    else:
+                        st.caption("⚠️ Trend is not statistically significant (p ≥ 0.05)")
+
+                # Moving average
+                if gto_ts.get('moving_average'):
+                    st.markdown("**3-Month Moving Average**")
+                    df_ma = pd.DataFrame(gto_ts['moving_average']).rename(columns={'value': '3-month MA'})
+                    st.line_chart(df_ma.set_index('month_year'))
+
+                # Decomposition
+                if gto_ts.get('decomposition'):
+                    st.markdown("**Seasonal Decomposition**")
+                    d = gto_ts['decomposition']
+                    dcol1, dcol2 = st.columns(2)
+                    with dcol1:
+                        if d.get('trend'):
+                            df_dt = pd.DataFrame(d['trend']).rename(columns={'value': 'Trend Component'})
+                            st.markdown("Trend Component")
+                            st.line_chart(df_dt.set_index('month_year'))
+                    with dcol2:
+                        if d.get('seasonal'):
+                            df_ds = pd.DataFrame(d['seasonal']).rename(columns={'value': 'Seasonal Component'})
+                            st.markdown("Seasonal Component")
+                            st.line_chart(df_ds.set_index('month_year'))
+
+                # Anomalies
+                anomalies = gto_ts.get('anomalies', [])
+                if anomalies:
+                    st.markdown("**⚠️ Anomalous Months (GTO)**")
+                    df_anom = pd.DataFrame(anomalies)
+                    st.dataframe(df_anom, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No anomalous months detected in GTO revenue.")
+
+            st.markdown("---")
+
+            # ── Campaign activity trend ───────────────────────────────────
+            st.markdown("### 🎯 Campaign Activity — Trend & Forecast")
+            camp_ts = ts.get('campaign_trend', {})
+
+            if camp_ts.get('error'):
+                st.warning(camp_ts['error'])
+            elif camp_ts.get('actual'):
+                df_actual_c   = pd.DataFrame(camp_ts['actual']).rename(columns={'value': 'Actual Activity'})
+                df_forecast_c = pd.DataFrame(camp_ts.get('forecast', [])).rename(columns={'forecast': 'Forecast'})
+
+                df_chart_c = df_actual_c.set_index('month_year')[['Actual Activity']]
+                if not df_forecast_c.empty:
+                    df_chart_c = df_chart_c.join(
+                        df_forecast_c.set_index('month_year')[['Forecast']], how='outer'
+                    )
+                st.line_chart(df_chart_c)
+
+                trend_c = camp_ts.get('trend', {})
+                if trend_c:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Trend Direction", trend_c.get('direction', '—').title())
+                    c2.metric("Trend Strength",  trend_c.get('strength',  '—').title())
+                    c3.metric("R²",              f"{trend_c.get('r_squared') or 0:.3f}")
+
+                anomalies_c = camp_ts.get('anomalies', [])
+                if anomalies_c:
+                    st.markdown("**⚠️ Anomalous Months (Campaign)**")
+                    st.dataframe(pd.DataFrame(anomalies_c), use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+
+            # ── Lead-lag analysis ─────────────────────────────────────────
+            st.markdown("### 🔗 Lead-Lag: Do Campaigns Drive Future GTO?")
+            st.caption("Tests whether campaign activity today predicts GTO revenue 0–3 months later.")
+
+            lead_lag = ts.get('lead_lag', {})
+            if lead_lag:
+                df_ll = pd.DataFrame([
+                    {
+                        'Lag (months)': int(k.replace('lag_', '')),
+                        'Correlation':  v.get('correlation'),
+                        'P-value':      v.get('p_value'),
+                        'Significant':  '✅' if v.get('significant') else '',
+                        'Description':  v.get('label', ''),
+                    }
+                    for k, v in lead_lag.items()
+                ])
+                st.dataframe(df_ll, use_container_width=True, hide_index=True)
+
+                # Bar chart of correlations by lag
+                df_ll_chart = df_ll.set_index('Lag (months)')[['Correlation']]
+                st.bar_chart(df_ll_chart)
