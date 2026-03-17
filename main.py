@@ -82,8 +82,12 @@ def run_script(label: str, path: Path, args: list) -> bool:
         env=env
     )
     for line in process.stdout:
-        sys.stdout.buffer.write(line.encode('utf-8', errors='replace'))
-        sys.stdout.buffer.flush()
+        # sys.stdout.buffer is unavailable in Spyder (TTYOutStream) — use print as fallback
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout.buffer.write(line.encode('utf-8', errors='replace'))
+            sys.stdout.buffer.flush()
+        else:
+            print(line, end='', flush=True)
     process.wait()
 
     if process.returncode == 0:
