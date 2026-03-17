@@ -19,7 +19,8 @@ import subprocess
 import io
 
 # Force UTF-8 output so emoji from subprocesses display correctly on Windows
-if sys.stdout.encoding != "utf-8":
+# Guarded: Spyder's TTYOutStream has no .buffer attribute so we skip it there
+if sys.stdout.encoding != "utf-8" and hasattr(sys.stdout, 'buffer'):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 from pathlib import Path
 
