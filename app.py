@@ -549,13 +549,15 @@ with tab_mapping:
         else:
             # Metrics
             method_counts = df_map['method'].value_counts().to_dict()
-            m_cols = st.columns(5)
-            for col, method in zip(m_cols, ['exact','fuzzy','confirmed','unmatched','gto_only']):
+            all_methods = ['confirmed', 'code_match', 'combined_exact', 'combined_fuzzy',
+               'exact', 'fuzzy', 'unmatched', 'gto_only']
+            m_cols = st.columns(len(all_methods))
+            for col, method in zip(m_cols, all_methods):
                 with col:
                     st.markdown(f"""
                     <div class="metric-box">
-                      <div class="metric-num">{method_counts.get(method, 0)}</div>
-                      <div class="metric-label">{method}</div>
+                        <div class="metric-num">{method_counts.get(method, 0)}</div>
+                        <div class="metric-label">{method}</div>
                     </div>""", unsafe_allow_html=True)
 
             st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
