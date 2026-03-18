@@ -216,7 +216,7 @@ def scan_and_convert(raw_data_folder: str):
         print("3. Rename _converted files (remove '_converted' suffix)")
         print("4. Re-run the pipeline")
         print("="*60)
-
+    return converted
 
 # ── Main ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -234,7 +234,7 @@ if __name__ == "__main__":
         print(f"ERROR Raw data folder not found: {raw_data_folder}")
         sys.exit(1)
 
-    scan_and_convert(raw_data_folder)
+    converted = scan_and_convert(raw_data_folder)
 
     # ── Auto rename: delete original, rename _converted ───────────────────
     if converted:
