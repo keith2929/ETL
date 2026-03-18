@@ -588,7 +588,7 @@ with tab_mapping:
                 g = str(row.get('gto_name', '')).strip()
                 return c if c and c != 'nan' else (g if g and g != 'nan' else '')
 
-            all_campaign_list = [
+            all_campaign_list_raw = [
                 {
                     'name':   str(r['campaign_name']).strip(),
                     'method': str(r['method']).strip(),
@@ -597,6 +597,11 @@ with tab_mapping:
                 for _, r in campaign_rows_df.iterrows()
                 if str(r.get('campaign_name', '')).strip() not in ('', 'nan')
             ]
+            # Unmatched rows float to the top, matched rows follow alphabetically
+            all_campaign_list = (
+                sorted([x for x in all_campaign_list_raw if x['method'] == 'unmatched'],  key=lambda x: x['name'].lower()) +
+                sorted([x for x in all_campaign_list_raw if x['method'] != 'unmatched'],  key=lambda x: x['name'].lower())
+            )
 
             gto_only_list = [
                 r for r in gto_only_rows['gto_name'].tolist()
@@ -689,6 +694,16 @@ with tab_mapping:
   .gto-chip.dragging{{opacity:.35;cursor:grabbing}}
   .gto-chip.used{{opacity:.3;text-decoration:line-through;cursor:not-allowed;pointer-events:none}}
   .empty-hint{{color:#6b7280;font-size:11px;text-align:center;padding:20px 0}}
+  /* ── search box ── */
+  .search-wrap{{position:sticky;top:32px;z-index:1;padding:6px 0 8px;background:#16181c}}
+  .search-input{{
+    width:100%;background:#0e0f11;border:1px solid #2a2d35;
+    border-radius:5px;color:#e8eaf0;font-family:'DM Mono','Courier New',monospace;
+    font-size:11px;padding:6px 10px;outline:none;
+    transition:border-color .15s;
+  }}
+  .search-input:focus{{border-color:#c8f135}}
+  .search-input::placeholder{{color:#4b5563}}
 </style>
 </head>
 <body>
@@ -699,6 +714,9 @@ with tab_mapping:
   </div>
   <div class="panel">
     <div class="panel-title">🏬 GTO-Only Shops — drag to match</div>
+    <div class="search-wrap">
+      <input id="gto-search" class="search-input" type="text" placeholder="Search GTO shops…" autocomplete="off" />
+    </div>
     <div id="gto-list"></div>
   </div>
 </div>
@@ -806,19 +824,24 @@ function renderCamp() {{
 }}
 
 function renderGTO() {{
-  const el = document.getElementById('gto-list');
+  const el    = document.getElementById('gto-list');
+  const query = (document.getElementById('gto-search')?.value || '').toLowerCase().trim();
   if (!gtoOnly.length) {{
     el.innerHTML = '<div class="empty-hint">No GTO-only shops available</div>';
     return;
   }}
   el.innerHTML = '';
-  // "used" = consumed by a drag match OR already locked to this GTO name
   const usedByDrag   = new Set(Object.values(matches));
   const usedByLocked = new Set(
     allCampaign.filter(r => locked.has(r.name.toLowerCase())).map(r => r.gto)
   );
   const used = new Set([...usedByDrag, ...usedByLocked]);
-  gtoOnly.forEach(name => {{
+  const filtered = query ? gtoOnly.filter(n => n.toLowerCase().includes(query)) : gtoOnly;
+  if (!filtered.length) {{
+    el.innerHTML = '<div class="empty-hint">No results for "' + query + '"</div>';
+    return;
+  }}
+  filtered.forEach(name => {{
     const chip = document.createElement('div');
     chip.className = 'gto-chip' + (used.has(name) ? ' used' : '');
     chip.textContent = name;
@@ -829,6 +852,8 @@ function renderGTO() {{
   }});
 }}
 
+
+
 function push() {{
   window.parent.postMessage({{
     type: 'streamlit:setComponentValue',
@@ -837,6 +862,9 @@ function push() {{
 }}
 
 render();
+// Also attach immediately since iframe scripts run after DOM is ready
+const _inp = document.getElementById('gto-search');
+if (_inp) _inp.addEventListener('input', renderGTO);
 </script>
 </body>
 </html>"""
