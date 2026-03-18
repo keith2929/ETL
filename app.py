@@ -121,6 +121,17 @@ hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 .badge-confirmed { background: #1a2a2e; color: #60d0ff;        border: 1px solid #1a3a4a; }
 .badge-unmatched { background: #2e1a1a; color: var(--danger);  border: 1px solid #4a1a1a; }
 .badge-gto_only  { background: #2a1a2e; color: #c084fc;        border: 1px solid #3a1a4a; }
+/* Regression tab specific */
+.reg-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.2rem 1.5rem; margin-bottom: 1rem;
+}
+.reg-insight {
+    background: #1a1f2e; border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0; padding: 0.8rem 1.2rem;
+    font-size: 0.82rem; color: var(--text); margin: 0.8rem 0;
+    line-height: 1.6;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -232,8 +243,9 @@ if selected_config is None:
 
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-tab_run, tab_config, tab_mapping, tab_schema, tab_insights, tab_ts = st.tabs([
-    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA", "📊  INSIGHTS", "📈  TIME SERIES"
+tab_run, tab_config, tab_mapping, tab_schema, tab_insights, tab_ts, tab_reg = st.tabs([
+    "▶  RUN", "⚙  CONFIG", "🔗  SHOP MAPPING", "📋  SCHEMA",
+    "📊  INSIGHTS", "📈  TIME SERIES", "📉  REGRESSION"
 ])
 
 
@@ -280,17 +292,22 @@ with tab_run:
         all_log         = "\n".join(st.session_state.log_lines)
         loader_done     = "OK Data Loader completed" in all_log or "COMPLETED" in all_log
         regression_done = "OK Regression completed"  in all_log or "REGRESSION COMPLETED" in all_log
+        linreg_done     = "OK Linear Regression completed" in all_log or "LINEAR REGRESSION COMPLETED"  in all_log
 
         # Update status badge in-place (no full page re-render)
         if st.session_state.running:
-            if regression_done:
+            if linreg_done:
                 status_placeholder.info("⏳ Finalising...")
+            elif regression_done:
+                status_placeholder.info("✅ Regression complete — running Linear Regression...")
             elif loader_done:
                 status_placeholder.info("✅ Data Loader complete — running Regression...")
             else:
                 status_placeholder.info("⏳ Running Data Loader...")
         elif st.session_state.last_exit == 0:
-            status_placeholder.success("✅ Data Loader complete  ·  ✅ Regression complete")
+            status_placeholder.success(
+                "✅ Data Loader complete  ·  ✅ Regression complete  ·  ✅ Linear Regression complete"
+            )
         elif st.session_state.last_exit is not None:
             error_lines = [l for l in st.session_state.log_lines if 'error' in l.lower()]
             hint = error_lines[-1] if error_lines else "Check logs for details."
@@ -916,3 +933,206 @@ with tab_ts:
                 # Bar chart of correlations by lag
                 df_ll_chart = df_ll.set_index('Lag (months)')[['Correlation']]
                 st.bar_chart(df_ll_chart)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — REGRESSION (Linear Regression Results)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_reg:
+    paths_reg    = load_config(selected_config)
+    combined_reg = paths_reg.get('combined_data', '')
+    reg_json     = os.path.join(combined_reg, 'linear_regression_results.json') if combined_reg else ''
+    reg_xlsx     = os.path.join(combined_reg, 'linear_regression_summary.xlsx') if combined_reg else ''
+
+    if not reg_json or not Path(reg_json).exists():
+        st.info("No regression results yet — run the pipeline first to generate linear regression analysis.")
+        st.stop()
+
+    with open(reg_json) as f:
+        reg_data = json.load(f)
+
+    lr = reg_data.get('linear_regression', {})
+    if not lr:
+        st.info("No regression results found in file.")
+        st.stop()
+
+    # ── Summary table ─────────────────────────────────────────────────────────
+    st.markdown("### 📊 Model Comparison Summary")
+    st.caption("All regression models across monthly / outlet / panel levels, full and stepwise.")
+
+    summary_rows = lr.get('summary', [])
+    if summary_rows:
+        df_sum = pd.DataFrame(summary_rows)
+        display_cols = ['model_key', 'model_type', 'level', 'target',
+                        'r_squared', 'adj_r_squared', 'f_pvalue', 'n_obs',
+                        'cv_rmse', 'cv_r2']
+        display_cols = [c for c in display_cols if c in df_sum.columns]
+        st.dataframe(
+            df_sum[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'r_squared':     st.column_config.ProgressColumn('R²',      min_value=0, max_value=1, format='%.3f'),
+                'adj_r_squared': st.column_config.ProgressColumn('Adj R²',  min_value=0, max_value=1, format='%.3f'),
+                'cv_r2':         st.column_config.ProgressColumn('CV R²',   min_value=0, max_value=1, format='%.3f'),
+            }
+        )
+        valid = df_sum.dropna(subset=['adj_r_squared'])
+        if not valid.empty:
+            best = valid.loc[valid['adj_r_squared'].idxmax()]
+            st.markdown(
+                f'<div class="reg-insight">🏆 Best model: <strong>{best["model_key"]}</strong> '
+                f'({best["model_type"]}) — Adj-R² = <strong>{best["adj_r_squared"]:.3f}</strong>, '
+                f'CV-R² = {best.get("cv_r2") or "—"}</div>',
+                unsafe_allow_html=True
+            )
+
+    st.markdown("---")
+
+    # ── Model detail explorer ─────────────────────────────────────────────────
+    st.markdown("### 🔍 Explore Individual Models")
+
+    model_keys = [k for k in lr.keys() if k != 'summary']
+    if not model_keys:
+        st.warning("No individual model results found.")
+        st.stop()
+
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        selected_key = st.selectbox(
+            "Select model", model_keys,
+            format_func=lambda k: k.replace('_', ' ').title(),
+            key="reg_model_key"
+        )
+    with col_sel2:
+        model_type = st.radio(
+            "Model type",
+            ["full_model", "stepwise_model"],
+            format_func=lambda x: "Full (all features)" if x == "full_model" else "Stepwise (significant only)",
+            horizontal=True, key="reg_model_type"
+        )
+
+    model = lr.get(selected_key, {}).get(model_type, {})
+
+    if model.get('error'):
+        st.error(f"Model error: {model['error']}")
+        st.stop()
+
+    if model.get('insight'):
+        st.markdown(f'<div class="reg-insight">💡 {model["insight"]}</div>', unsafe_allow_html=True)
+
+    # ── Model fit metrics ─────────────────────────────────────────────────────
+    st.markdown("#### Model Fit")
+    fit = model.get('model_fit', {})
+    cv  = model.get('cross_validation', {})
+
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
+    mc1.metric("R²",       f"{fit.get('r_squared') or 0:.3f}")
+    mc2.metric("Adj R²",   f"{fit.get('adj_r_squared') or 0:.3f}")
+    mc3.metric("F p-value",f"{fit.get('f_pvalue') or 0:.4f}")
+    mc4.metric("N obs",    fit.get('n_obs', '—'))
+    mc5.metric("CV RMSE",  f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
+    mc6.metric("CV R²",    f"{cv.get('cv_r2_mean') or 0:.3f}"    if cv.get('cv_r2_mean')  else "—")
+
+    dw = fit.get('dw_stat')
+    if dw is not None:
+        dw_label = "✅ No autocorrelation" if 1.5 < dw < 2.5 else "⚠️ Possible autocorrelation"
+        st.caption(f"Durbin-Watson: {dw:.3f}  —  {dw_label}")
+
+    st.markdown("---")
+
+    # ── Coefficient table ─────────────────────────────────────────────────────
+    st.markdown("#### Coefficients (standardised)")
+    coef_table = model.get('coef_table', [])
+    if coef_table:
+        df_coef = pd.DataFrame(coef_table)
+        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy()
+        col_chart, col_table = st.columns([2, 3])
+        with col_chart:
+            if not df_coef_plot.empty and 'coef' in df_coef_plot.columns:
+                st.markdown("**Coefficient magnitudes**")
+                st.bar_chart(df_coef_plot.set_index('feature')['coef'])
+        with col_table:
+            display_coef_cols = ['feature', 'coef', 'std_err', 't_stat',
+                                 'p_value', 'ci_lower', 'ci_upper', 'significant']
+            display_coef_cols = [c for c in display_coef_cols if c in df_coef.columns]
+
+            def highlight_sig(row):
+                if row.get('significant') is True:
+                    return ['background-color: #1a2e1a'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(
+                df_coef[display_coef_cols].style.apply(highlight_sig, axis=1),
+                use_container_width=True, hide_index=True
+            )
+        st.caption("✅ Green rows = significant at p < 0.05. Standardised β — comparable in magnitude.")
+
+    st.markdown("---")
+
+    # ── VIF ───────────────────────────────────────────────────────────────────
+    vif_data = model.get('vif', [])
+    if vif_data:
+        st.markdown("#### Multicollinearity Check (VIF)")
+        df_vif = pd.DataFrame(vif_data)
+        col_v1, col_v2 = st.columns([1, 2])
+        with col_v1:
+            st.dataframe(df_vif, use_container_width=True, hide_index=True)
+        with col_v2:
+            st.caption("""
+            **VIF interpretation:**
+            - VIF < 5  → ✅ No multicollinearity concern
+            - VIF 5–10 → ⚠️ Moderate multicollinearity
+            - VIF > 10 → ❌ High — consider dropping the feature
+            """)
+            if not df_vif.empty and 'vif' in df_vif.columns:
+                max_vif = df_vif['vif'].dropna().max()
+                if max_vif and max_vif > 10:
+                    st.warning(f"⚠️ Max VIF = {max_vif:.1f} — multicollinearity detected.")
+                elif max_vif and max_vif > 5:
+                    st.warning(f"⚠️ Max VIF = {max_vif:.1f} — moderate multicollinearity.")
+                else:
+                    st.success("✅ All VIF values look good (< 5).")
+
+    st.markdown("---")
+
+    # ── Stepwise info ─────────────────────────────────────────────────────────
+    if model_type == 'stepwise_model':
+        dropped = model.get('stepwise_dropped', [])
+        final   = model.get('stepwise_final_features', [])
+        if dropped:
+            st.markdown("#### Stepwise Feature Selection")
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.markdown("**Dropped features** (p ≥ 0.10)")
+                st.dataframe(pd.DataFrame(dropped), use_container_width=True, hide_index=True)
+            with col_d2:
+                st.markdown("**Retained features**")
+                st.dataframe(pd.DataFrame({'feature': final}), use_container_width=True, hide_index=True)
+        st.markdown("---")
+
+    # ── Residuals ─────────────────────────────────────────────────────────────
+    residuals = model.get('residuals', [])
+    if residuals:
+        st.markdown("#### Residual Diagnostics")
+        df_resid = pd.DataFrame(residuals)
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            st.markdown("**Fitted vs Residuals**")
+            st.scatter_chart(df_resid, x='fitted', y='residual', height=280)
+            st.caption("Ideal: randomly scattered around 0 — no funnel shape.")
+        with col_r2:
+            st.markdown("**Standardised Residuals Distribution**")
+            st.bar_chart(df_resid['std_resid'].value_counts(bins=15).sort_index(), height=280)
+            st.caption("Ideal: roughly bell-shaped around 0.")
+
+    st.markdown("---")
+
+    # ── Download ──────────────────────────────────────────────────────────────
+    if reg_xlsx and Path(reg_xlsx).exists():
+        with open(reg_xlsx, 'rb') as fh:
+            st.download_button(
+                "⬇️  Download Regression Summary (.xlsx)", data=fh.read(),
+                file_name='linear_regression_summary.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                type='primary'
+            )
