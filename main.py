@@ -131,6 +131,7 @@ if __name__ == "__main__":
     scripts_with_args = [
         ("Data Loader", SCRIPT_DIR / "data_loader.py", [raw_data, cleaned_data, schemas, shop_mapping, config_file]),
         ("Regression",  SCRIPT_DIR / "regression.py",  [cleaned_data, combined_data, shop_mapping]),
+        ("Linear Regression", SCRIPT_DIR / "linear_regression.py", [cleaned_data, combined_data, shop_mapping]),
     ]
 
     for label, script_path, args in scripts_with_args:
