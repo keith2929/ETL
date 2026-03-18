@@ -192,9 +192,10 @@ def run_pipeline(config_file: str, log_queue: queue.Queue):
     log_queue.put(f"__EXIT__{process.returncode}")
 
 # ── Session state ─────────────────────────────────────────────────────────────
-if 'log_lines' not in st.session_state: st.session_state.log_lines = []
-if 'last_exit' not in st.session_state: st.session_state.last_exit = None
-if 'running'   not in st.session_state: st.session_state.running   = False
+if 'log_lines'    not in st.session_state: st.session_state.log_lines    = []
+if 'last_exit'    not in st.session_state: st.session_state.last_exit    = None
+if 'running'      not in st.session_state: st.session_state.running      = False
+if 'drag_matches' not in st.session_state: st.session_state.drag_matches = {}
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -532,9 +533,11 @@ with tab_config:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — SHOP MAPPING
+# TAB 3 — SHOP MAPPING  (drag-and-drop + table editor)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_mapping:
+    import streamlit.components.v1 as components
+
     sel_cfg      = selected_config
     paths        = load_config(sel_cfg)
     mapping_path = paths.get('shop_mapping', '')
@@ -547,10 +550,16 @@ with tab_mapping:
         if df_map.empty:
             st.info("No shop mapping file yet — run the pipeline first to generate it.")
         else:
-            # Metrics
+            # Apply any drag-drop matches already in session state
+            for camp_name, gto_name in st.session_state.drag_matches.items():
+                mask = df_map['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
+                df_map.loc[mask, 'confirmed_gto_name'] = gto_name
+                df_map.loc[mask, 'method']             = 'confirmed'
+
+            # ── Metrics ───────────────────────────────────────────────────
             method_counts = df_map['method'].value_counts().to_dict()
-            all_methods = ['confirmed', 'code_match', 'combined_exact', 'combined_fuzzy',
-               'exact', 'fuzzy', 'unmatched', 'gto_only']
+            all_methods   = ['confirmed', 'code_match', 'combined_exact', 'combined_fuzzy',
+                             'exact', 'fuzzy', 'unmatched', 'gto_only']
             m_cols = st.columns(len(all_methods))
             for col, method in zip(m_cols, all_methods):
                 with col:
@@ -560,7 +569,297 @@ with tab_mapping:
                         <div class="metric-label">{method}</div>
                     </div>""", unsafe_allow_html=True)
 
-            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+
+            # ── Separate rows by match status ─────────────────────────────
+            gto_only_rows  = df_map[df_map['method'] == 'gto_only'].copy()
+
+            # ── Drag-and-drop widget (always shown) ───────────────────────
+            st.markdown("#### 🎯 Shop Matching")
+            st.caption("Drag a GTO name (right) onto any unmatched campaign row (left). Already-matched rows are shown in teal — read-only.")
+
+            # All campaign rows (exclude gto_only meta-rows which have no campaign_name)
+            campaign_rows_df = df_map[df_map['method'] != 'gto_only'].copy()
+
+            # Build list of dicts: {name, method, existing_gto}
+            # existing_gto = confirmed_gto_name if set, else gto_name
+            def _existing(row):
+                c = str(row.get('confirmed_gto_name', '')).strip()
+                g = str(row.get('gto_name', '')).strip()
+                return c if c and c != 'nan' else (g if g and g != 'nan' else '')
+
+            all_campaign_list = [
+                {
+                    'name':   str(r['campaign_name']).strip(),
+                    'method': str(r['method']).strip(),
+                    'gto':    _existing(r),
+                }
+                for _, r in campaign_rows_df.iterrows()
+                if str(r.get('campaign_name', '')).strip() not in ('', 'nan')
+            ]
+
+            gto_only_list = [
+                r for r in gto_only_rows['gto_name'].tolist()
+                if r and str(r).strip() not in ('', 'nan')
+            ]
+
+            # Pass current session matches back into widget to survive reruns
+            init_matches_json = json.dumps(st.session_state.drag_matches)
+
+            # Height: 48px per row on the taller side, capped at 700, min 280
+            widget_height = min(700, max(280, 60 + max(len(all_campaign_list), len(gto_only_list), 1) * 48))
+
+            drag_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{
+    background:transparent;
+    font-family:'DM Mono','Courier New',monospace;
+    font-size:13px;color:#e8eaf0;
+  }}
+  .wrapper{{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:2px}}
+  .panel{{
+    background:#16181c;border:1px solid #2a2d35;
+    border-radius:8px;padding:14px;min-height:120px;overflow-y:auto;
+  }}
+  .panel-title{{
+    font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+    color:#6b7280;margin-bottom:10px;padding-bottom:8px;
+    border-bottom:1px solid #2a2d35;position:sticky;top:0;
+    background:#16181c;z-index:1;
+  }}
+  /* ── campaign rows ── */
+  .camp-row{{
+    display:flex;align-items:center;gap:8px;
+    padding:7px 10px;margin-bottom:5px;
+    border-radius:6px;min-height:40px;
+    transition:border-color .15s,background .15s;
+  }}
+  /* unmatched — dashed, droppable */
+  .camp-row.open{{
+    border:1px dashed #2a2d35;background:#0e0f11;cursor:default;
+  }}
+  .camp-row.open.over{{border-color:#c8f135;background:#1a2200}}
+  /* drag-matched this session — solid teal, has ✕ */
+  .camp-row.drag-matched{{
+    border:1px solid #4af0c4;background:#0a1e1a;
+  }}
+  /* locked: already matched before this session (exact/fuzzy/confirmed/code) */
+  .camp-row.locked{{
+    border:1px solid #1a4a3a;background:#0a1a14;opacity:.75;
+  }}
+  .camp-name{{flex:1;color:#e8eaf0;font-size:12px;word-break:break-word}}
+  .method-badge{{
+    font-size:10px;padding:2px 6px;border-radius:3px;flex-shrink:0;
+    letter-spacing:.06em;text-transform:uppercase;
+  }}
+  .badge-exact,.badge-combined_exact{{background:#1a2e1a;color:#4af0c4;border:1px solid #2a4a2a}}
+  .badge-fuzzy,.badge-combined_fuzzy{{background:#2e2a1a;color:#fbbf24;border:1px solid #4a3a1a}}
+  .badge-confirmed,.badge-code_match{{background:#1a2a2e;color:#60d0ff;border:1px solid #1a3a4a}}
+  .badge-unmatched{{background:#2e1a1a;color:#ff5c5c;border:1px solid #4a1a1a}}
+  .matched-tag{{
+    display:flex;align-items:center;gap:5px;
+    background:#1a2e1a;border:1px solid #2a4a2a;
+    color:#4af0c4;font-size:11px;padding:3px 8px;
+    border-radius:4px;max-width:200px;word-break:break-word;flex-shrink:0;
+  }}
+  .locked-tag{{
+    display:flex;align-items:center;gap:5px;
+    background:#0f2a22;border:1px solid #1a4a3a;
+    color:#2a8a6a;font-size:11px;padding:3px 8px;
+    border-radius:4px;max-width:200px;word-break:break-word;flex-shrink:0;
+  }}
+  .rm-btn{{
+    cursor:pointer;background:none;border:none;
+    color:#ff5c5c;font-size:13px;line-height:1;padding:0 2px;flex-shrink:0;
+  }}
+  .rm-btn:hover{{color:#ff8888}}
+  /* ── GTO chips ── */
+  .gto-chip{{
+    display:inline-flex;align-items:center;
+    padding:5px 10px;margin:3px;
+    background:#1e1a2e;border:1px solid #3a2a4a;
+    color:#c084fc;border-radius:4px;font-size:11px;
+    cursor:grab;user-select:none;
+    transition:opacity .15s,transform .1s,border-color .15s;
+  }}
+  .gto-chip:hover{{border-color:#c084fc;transform:translateY(-1px)}}
+  .gto-chip.dragging{{opacity:.35;cursor:grabbing}}
+  .gto-chip.used{{opacity:.3;text-decoration:line-through;cursor:not-allowed;pointer-events:none}}
+  .empty-hint{{color:#6b7280;font-size:11px;text-align:center;padding:20px 0}}
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="panel">
+    <div class="panel-title">📋 All Campaign Names</div>
+    <div id="camp-list"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">🏬 GTO-Only Shops — drag to match</div>
+    <div id="gto-list"></div>
+  </div>
+</div>
+<script>
+const allCampaign = {json.dumps(all_campaign_list)};
+const gtoOnly     = {json.dumps(gto_only_list)};
+const initMatches = {init_matches_json};
+
+// session drag matches: campaign_name_lower → gto_name
+const matches = {{}};
+for (const [k,v] of Object.entries(initMatches)) matches[k.toLowerCase()] = v;
+
+// locked set: names already matched before this session
+const locked = new Set(
+  allCampaign
+    .filter(r => r.method !== 'unmatched' && r.gto)
+    .map(r => r.name.toLowerCase())
+);
+
+let dragGTO = null;
+
+function render() {{ renderCamp(); renderGTO(); }}
+
+function renderCamp() {{
+  const el = document.getElementById('camp-list');
+  el.innerHTML = '';
+  if (!allCampaign.length) {{
+    el.innerHTML = '<div class="empty-hint">No campaign names found</div>';
+    return;
+  }}
+  allCampaign.forEach(item => {{
+    const key        = item.name.toLowerCase();
+    const isLocked   = locked.has(key);
+    const dragHit    = matches[key];
+    const displayGTO = dragHit || item.gto;
+
+    const row = document.createElement('div');
+    row.dataset.key = key;
+
+    if (isLocked) {{
+      row.className = 'camp-row locked';
+    }} else if (dragHit) {{
+      row.className = 'camp-row drag-matched';
+    }} else {{
+      row.className = 'camp-row open';
+    }}
+
+    // Campaign name
+    const span = document.createElement('span');
+    span.className   = 'camp-name';
+    span.textContent = item.name;
+    row.appendChild(span);
+
+    // Method badge (for already-matched rows)
+    if (isLocked && item.method) {{
+      const badge = document.createElement('span');
+      badge.className   = 'method-badge badge-' + item.method.replace(/[^a-z_]/g,'');
+      badge.textContent = item.method;
+      row.appendChild(badge);
+    }}
+
+    // GTO tag
+    if (displayGTO) {{
+      const tag = document.createElement('div');
+      tag.className = isLocked ? 'locked-tag' : 'matched-tag';
+      const lbl = document.createElement('span');
+      lbl.textContent = displayGTO;
+      tag.appendChild(lbl);
+
+      // Only drag-matched rows get a remove button
+      if (!isLocked && dragHit) {{
+        const btn = document.createElement('button');
+        btn.className   = 'rm-btn';
+        btn.textContent = '✕';
+        btn.title       = 'Remove match';
+        btn.onclick = e => {{
+          e.stopPropagation();
+          delete matches[key];
+          push(); render();
+        }};
+        tag.appendChild(btn);
+      }}
+      row.appendChild(tag);
+    }}
+
+    // Drop events only for open rows
+    if (!isLocked && !dragHit) {{
+      row.addEventListener('dragover', e => {{
+        e.preventDefault();
+        row.classList.add('over');
+      }});
+      row.addEventListener('dragleave', () => row.classList.remove('over'));
+      row.addEventListener('drop', e => {{
+        e.preventDefault();
+        row.classList.remove('over');
+        if (dragGTO) {{
+          matches[key] = dragGTO;
+          push(); render();
+        }}
+      }});
+    }}
+
+    el.appendChild(row);
+  }});
+}}
+
+function renderGTO() {{
+  const el = document.getElementById('gto-list');
+  if (!gtoOnly.length) {{
+    el.innerHTML = '<div class="empty-hint">No GTO-only shops available</div>';
+    return;
+  }}
+  el.innerHTML = '';
+  // "used" = consumed by a drag match OR already locked to this GTO name
+  const usedByDrag   = new Set(Object.values(matches));
+  const usedByLocked = new Set(
+    allCampaign.filter(r => locked.has(r.name.toLowerCase())).map(r => r.gto)
+  );
+  const used = new Set([...usedByDrag, ...usedByLocked]);
+  gtoOnly.forEach(name => {{
+    const chip = document.createElement('div');
+    chip.className = 'gto-chip' + (used.has(name) ? ' used' : '');
+    chip.textContent = name;
+    chip.draggable   = !used.has(name);
+    chip.addEventListener('dragstart', () => {{ dragGTO = name; chip.classList.add('dragging'); }});
+    chip.addEventListener('dragend',   () => chip.classList.remove('dragging'));
+    el.appendChild(chip);
+  }});
+}}
+
+function push() {{
+  window.parent.postMessage({{
+    type: 'streamlit:setComponentValue',
+    value: JSON.stringify(matches)
+  }}, '*');
+}}
+
+render();
+</script>
+</body>
+</html>"""
+
+            result = components.html(drag_html, height=widget_height, scrolling=True)
+
+            # Parse matches returned by the component
+            if result:
+                try:
+                    new_matches = json.loads(result)
+                    if new_matches != st.session_state.drag_matches:
+                        st.session_state.drag_matches = new_matches
+                        for camp_name, gto_name in new_matches.items():
+                            mask = df_map['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
+                            df_map.loc[mask, 'confirmed_gto_name'] = gto_name
+                            df_map.loc[mask, 'method']             = 'confirmed'
+                except Exception:
+                    pass
+
+            # ── Full mapping table (editable) ──────────────────────────────
+            st.markdown("---")
+            st.markdown("#### 📋 All Mappings")
+            st.caption("Review every row. You can also type directly in the **✏ Confirmed** column to override any match.")
 
             edited = st.data_editor(
                 df_map,
@@ -576,8 +875,16 @@ with tab_mapping:
                 key="mapping_editor"
             )
 
+            # ── Save ──────────────────────────────────────────────────────
+            st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
             if st.button("💾  Save Shop Mapping", type="primary"):
+                # Merge drag-drop results into the manually-edited df
+                for camp_name, gto_name in st.session_state.drag_matches.items():
+                    mask = edited['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
+                    edited.loc[mask, 'confirmed_gto_name'] = gto_name
+                    edited.loc[mask, 'method']             = 'confirmed'
                 save_shop_mapping(mapping_path, edited)
+                st.session_state.drag_matches = {}   # clear pending state after save
                 st.success("✅ Saved. Re-run the pipeline to apply changes.")
 
 
