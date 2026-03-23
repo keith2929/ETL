@@ -195,7 +195,8 @@ def run_pipeline(config_file: str, log_queue: queue.Queue):
 if 'log_lines'    not in st.session_state: st.session_state.log_lines    = []
 if 'last_exit'    not in st.session_state: st.session_state.last_exit    = None
 if 'running'      not in st.session_state: st.session_state.running      = False
-if 'drag_matches' not in st.session_state: st.session_state.drag_matches = {}
+if 'drag_matches'    not in st.session_state: st.session_state.drag_matches    = {}
+if 'mapping_editor_v' not in st.session_state: st.session_state.mapping_editor_v = 0
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -557,6 +558,15 @@ with tab_mapping:
                 df_map.loc[mask, 'method']             = 'confirmed'
                 df_map.loc[mask, 'gto_name']           = gto_name
 
+            # Pre-populate confirmed_gto_name from gto_name for already-matched rows
+            # so the Confirmed column shows the value rather than appearing blank
+            fill_mask = (
+                (df_map['method'].isin(['exact', 'fuzzy', 'confirmed', 'code_match', 'combined_exact', 'combined_fuzzy'])) &
+                (df_map['confirmed_gto_name'].astype(str).str.strip().isin(['', 'nan'])) &
+                (df_map['gto_name'].astype(str).str.strip() != '')
+            )
+            df_map.loc[fill_mask, 'confirmed_gto_name'] = df_map.loc[fill_mask, 'gto_name']
+
             # ── Metrics ───────────────────────────────────────────────────
             method_counts = df_map['method'].value_counts().to_dict()
             all_methods   = ['confirmed', 'code_match', 'combined_exact', 'combined_fuzzy',
@@ -893,7 +903,7 @@ if (_inp) _inp.addEventListener('input', renderGTO);
                     "method":             st.column_config.TextColumn("Method",         disabled=True),
                 },
                 hide_index=True,
-                key="mapping_editor"
+                key=f"mapping_editor_{st.session_state.mapping_editor_v}"
             )
 
             # ── Save ──────────────────────────────────────────────────────
@@ -934,9 +944,12 @@ if (_inp) _inp.addEventListener('input', renderGTO);
                     (edited['gto_name'].astype(str).str.strip().str.lower().isin(used_gto))
                 )].reset_index(drop=True)
 
-                removed = before - len(edited)     
+                removed = before - len(edited)
                 save_shop_mapping(mapping_path, edited)
-                st.success(f"✅ Saved! {removed} gto_only rows removed")
+                st.session_state.drag_matches = {}
+                st.session_state.mapping_editor_v += 1
+                st.success(f"✅ Saved! {removed} gto_only row(s) removed")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
