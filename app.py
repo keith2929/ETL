@@ -555,6 +555,7 @@ with tab_mapping:
                 mask = df_map['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
                 df_map.loc[mask, 'confirmed_gto_name'] = gto_name
                 df_map.loc[mask, 'method']             = 'confirmed'
+                df_map.loc[mask, 'gto_name']           = gto_name
 
             # ── Metrics ───────────────────────────────────────────────────
             method_counts = df_map['method'].value_counts().to_dict()
@@ -870,18 +871,10 @@ if (_inp) _inp.addEventListener('input', renderGTO);
 </html>"""
 
             result = components.html(drag_html, height=widget_height, scrolling=True)
-
-            # Parse matches returned by the component
             if result:
                 try:
-                    new_matches = json.loads(result)
-                    if new_matches != st.session_state.drag_matches:
-                        st.session_state.drag_matches = new_matches
-                        for camp_name, gto_name in new_matches.items():
-                            mask = df_map['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
-                            df_map.loc[mask, 'confirmed_gto_name'] = gto_name
-                            df_map.loc[mask, 'method']             = 'confirmed'
-                except Exception:
+                    st.session_state.drag_matches = json.loads(result)
+                except:
                     pass
 
             # ── Full mapping table (editable) ──────────────────────────────
@@ -905,40 +898,45 @@ if (_inp) _inp.addEventListener('input', renderGTO);
 
             # ── Save ──────────────────────────────────────────────────────
             st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
-            if st.button("💾  Save Shop Mapping", type="primary"):  
-                # Merge drag-drop results into the manually-edited df
+            
+            if st.button("💾  Save Shop Mapping", type="primary"):
+                
+                # Ensure edited is DataFrame
+                if isinstance(edited, dict):
+                    edited = pd.DataFrame(edited)
+
+                # Apply drag matches
                 for camp_name, gto_name in st.session_state.drag_matches.items():
                     mask = edited['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
+
                     edited.loc[mask, 'confirmed_gto_name'] = gto_name
-                    edited.loc[mask, 'gto_name']           = gto_name
-                    edited.loc[mask, 'suggested_gto_name'] = gto_name
-                    edited.loc[mask, 'method']             = 'confirmed'
+                    edited.loc[mask, 'method'] = 'confirmed'
+                    edited.loc[mask, 'gto_name'] = gto_name
 
-                # ★ Remove gto_only rows that have been matched by drag-drop
-                matched_gto_names = set(st.session_state.drag_matches.values())
-                # Also include gto_only rows matched via confirmed_gto_name column
-                confirmed_gto = set(
-                    edited.loc[
-                        (edited['method'] != 'gto_only') &
-                        (edited['confirmed_gto_name'].astype(str).str.strip() != '') &
-                        (edited['confirmed_gto_name'].astype(str).str.strip() != 'nan'),
-                        'confirmed_gto_name'
-                    ].str.strip().str.lower()
+                # Sync confirmed values
+                mask_confirmed = (
+                    edited['confirmed_gto_name'].astype(str).str.strip() != ''
                 )
-                matched_gto_names = matched_gto_names | confirmed_gto
 
-                # Drop gto_only rows where gto_name is now matched
+                edited.loc[mask_confirmed, 'method'] = 'confirmed'
+                edited.loc[mask_confirmed, 'gto_name'] = edited.loc[mask_confirmed, 'confirmed_gto_name']
+
+                # Remove used gto_only
+                used_gto = set(
+                    edited.loc[mask_confirmed, 'confirmed_gto_name']
+                    .astype(str).str.strip().str.lower()
+                )
+
                 before = len(edited)
+
                 edited = edited[~(
                     (edited['method'] == 'gto_only') &
-                    (edited['gto_name'].astype(str).str.strip().str.lower().isin(matched_gto_names))
+                    (edited['gto_name'].astype(str).str.strip().str.lower().isin(used_gto))
                 )].reset_index(drop=True)
-                removed = before - len(edited)
 
+                removed = before - len(edited)     
                 save_shop_mapping(mapping_path, edited)
-                st.session_state.drag_matches = {}
-                msg = f"✅ Saved. {removed} gto_only row(s) removed. Re-run the pipeline to apply changes."
-                st.success(msg)                 
+                st.success(f"✅ Saved! {removed} gto_only rows removed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
