@@ -905,15 +905,40 @@ if (_inp) _inp.addEventListener('input', renderGTO);
 
             # ── Save ──────────────────────────────────────────────────────
             st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
-            if st.button("💾  Save Shop Mapping", type="primary"):
+            if st.button("💾  Save Shop Mapping", type="primary"):  
                 # Merge drag-drop results into the manually-edited df
                 for camp_name, gto_name in st.session_state.drag_matches.items():
                     mask = edited['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
                     edited.loc[mask, 'confirmed_gto_name'] = gto_name
+                    edited.loc[mask, 'gto_name']           = gto_name
+                    edited.loc[mask, 'suggested_gto_name'] = gto_name
                     edited.loc[mask, 'method']             = 'confirmed'
+
+                # ★ Remove gto_only rows that have been matched by drag-drop
+                matched_gto_names = set(st.session_state.drag_matches.values())
+                # Also include gto_only rows matched via confirmed_gto_name column
+                confirmed_gto = set(
+                    edited.loc[
+                        (edited['method'] != 'gto_only') &
+                        (edited['confirmed_gto_name'].astype(str).str.strip() != '') &
+                        (edited['confirmed_gto_name'].astype(str).str.strip() != 'nan'),
+                        'confirmed_gto_name'
+                    ].str.strip().str.lower()
+                )
+                matched_gto_names = matched_gto_names | confirmed_gto
+
+                # Drop gto_only rows where gto_name is now matched
+                before = len(edited)
+                edited = edited[~(
+                    (edited['method'] == 'gto_only') &
+                    (edited['gto_name'].astype(str).str.strip().str.lower().isin(matched_gto_names))
+                )].reset_index(drop=True)
+                removed = before - len(edited)
+
                 save_shop_mapping(mapping_path, edited)
-                st.session_state.drag_matches = {}   # clear pending state after save
-                st.success("✅ Saved. Re-run the pipeline to apply changes.")
+                st.session_state.drag_matches = {}
+                msg = f"✅ Saved. {removed} gto_only row(s) removed. Re-run the pipeline to apply changes."
+                st.success(msg)                 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
