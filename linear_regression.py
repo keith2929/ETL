@@ -89,23 +89,7 @@ def load_data(data_folder: str, mapping_file: str = '') -> tuple[pd.DataFrame, p
                 campaign['month'].astype(str) + '-' + campaign['year'].astype(str)
             )
  
-    # ── Filter to matched shops ──
-    MATCHED_METHODS = {'exact', 'fuzzy', 'confirmed'}
-    if mapping_file and os.path.exists(mapping_file):
-        try:
-            mdf = pd.read_excel(mapping_file, sheet_name='mapping')
-            mdf['campaign_name'] = mdf['campaign_name'].astype(str).str.strip().str.lower()
-            mdf['method']        = mdf['method'].astype(str).str.strip().str.lower()
-            matched = set(mdf.loc[mdf['method'].isin(MATCHED_METHODS), 'campaign_name'])
-            if 'outlet_name' in campaign.columns:
-                before = len(campaign)
-                campaign = campaign[
-                    campaign['outlet_name'].str.strip().str.lower().isin(matched)
-                ].copy()
-                print(f"  Filtered to matched shops: {len(campaign):,} rows "
-                      f"({before - len(campaign):,} excluded)")
-        except Exception as e:
-            print(f"  ⚠️  Could not filter by mapping: {e}")
+
  
     # ── GTO rent ──
     gto_path = ''
@@ -118,7 +102,40 @@ def load_data(data_folder: str, mapping_file: str = '') -> tuple[pd.DataFrame, p
  
     gto = (pd.read_excel(gto_path) if gto_path.endswith('.xlsx')
            else pd.read_csv(gto_path))
- 
+    # ── Filter to matched shops ─
+    VALID_METHODS = {
+    'exact', 'fuzzy', 'confirmed',
+    'code_match', 'combined_exact', 'combined_fuzzy'
+    }
+
+    if mapping_file and os.path.exists(mapping_file):
+        try:
+            mdf = pd.read_excel(mapping_file, sheet_name='mapping')
+
+            mdf['campaign_name'] = mdf['campaign_name'].astype(str).str.strip().str.lower()
+            mdf['gto_name']      = mdf['gto_name'].astype(str).str.strip().str.lower()
+            mdf['method']        = mdf['method'].astype(str).str.strip().str.lower()
+
+            valid_map = mdf[mdf['method'].isin(VALID_METHODS)]
+
+            valid_campaign = set(valid_map['campaign_name'])
+            valid_gto      = set(valid_map['gto_name'])
+
+            # campaign filter
+            if 'outlet_name' in campaign.columns:
+                campaign = campaign[
+                    campaign['outlet_name'].str.strip().str.lower().isin(valid_campaign)
+                ].copy()
+
+            # ── GTO filter  ──
+            if 'shop_name' in gto.columns:
+                gto = gto[
+                    gto['shop_name'].str.strip().str.lower().isin(valid_gto)
+                ].copy()
+
+        except Exception as e:
+            print(f"⚠️ mapping filter failed: {e}")
+
     # Build month_year for GTO
     if 'month_year' not in gto.columns and 'gto_reporting_month' in gto.columns:
         gto['month_year'] = pd.to_datetime(
@@ -224,6 +241,7 @@ def build_regression_dataset(campaign: pd.DataFrame,
             df[t] = np.nan
  
     df = df.dropna(subset=TARGETS, how='all').reset_index(drop=True)
+    print("Final dataset rows:", len(df))
     print(f"    → {len(df)} rows, {df.shape[1]} columns")
     return df
  
@@ -388,9 +406,13 @@ def run_stepwise_ols(df: pd.DataFrame, target: str, features: list[str]) -> dict
             break   # all features significant
  
         worst_feat = pvals.idxmax()
-        dropped.append({'feature': worst_feat, 'p_value': safe_float(worst_p)})
-        remaining.remove(worst_feat)
-        print(f"    Stepwise iter {iteration}: dropped '{worst_feat}' (p={worst_p:.3f})")
+        if worst_feat in remaining:
+            dropped.append({'feature': worst_feat, 'p_value': safe_float(worst_p)})
+            remaining.remove(worst_feat)
+            print(f"    Stepwise iter {iteration}: dropped '{worst_feat}' (p={worst_p:.3f})")
+        else:
+            print(f"    ⚠️ Tried to drop '{worst_feat}' but not in remaining — skipping")
+            break
  
     result = run_ols(df, target, remaining) if remaining else {'target': target, 'error': 'No features survived stepwise selection'}
     result['stepwise_dropped'] = dropped
@@ -494,6 +516,9 @@ if __name__ == '__main__':
     print('='*60)
  
     campaign, gto = load_data(DATA_FOLDER, MAPPING_FILE)
+    print("After filtering:")
+    print("campaign rows:", len(campaign))
+    print("gto rows:", len(gto))
     print(f"  Loaded campaign: {len(campaign):,} rows | GTO: {len(gto):,} rows")
  
     results = run_linear_regression(campaign, gto)
