@@ -86,7 +86,8 @@ def analyse_campaign_roi(campaign, gto):
         txn_revenue  =('amount',        'sum'),
         redemptions  =('receipt_no',    'nunique'),
     ).reset_index()
-    monthly['campaign_cost']     = monthly['points_issued'] * POINTS_COST_SGD
+    print("DEBUG campaign columns:", campaign.columns.tolist())
+    monthly['campaign_cost'] = campaign.groupby('month_year')['voucher_value'].sum()
     monthly['voucher_redeemed']  = monthly['txn_revenue']
 
     if not gto.empty and 'month_year' in gto.columns:
