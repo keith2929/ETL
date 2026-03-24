@@ -219,6 +219,37 @@ def build_regression_dataset(campaign: pd.DataFrame,
     if 'points_issued' in df.columns:
         df['campaign_cost'] = df['points_issued'] * POINTS_COST_SGD
  
+    # ── Campaign dummy variables (individual campaigns) ──
+    voucher_col = find_col(campaign, ['voucher_code', 'campaign_source'])
+    if voucher_col and level in ('monthly', 'panel'):
+        # Count unique campaigns per group to keep top N (avoid too many dummies)
+        top_campaigns = (
+            campaign[voucher_col]
+            .value_counts()
+            .head(10)   # top 10 campaigns only
+            .index.tolist()
+        )
+        campaign_filtered = campaign[campaign[voucher_col].isin(top_campaigns)].copy()
+        campaign_filtered[voucher_col] = campaign_filtered[voucher_col].str[:20]  # truncate long names
+
+        if level == 'monthly':
+            dummies = pd.get_dummies(
+                campaign_filtered.groupby('month_year')[voucher_col]
+                .agg(lambda x: x.mode()[0] if not x.empty else 'none'),
+                prefix='camp'
+            )
+            df = df.merge(dummies, on='month_year', how='left').fillna(0)
+
+        elif level == 'panel':
+            dummies = pd.get_dummies(
+                campaign_filtered.groupby([outlet_col, 'month_year'])[voucher_col]
+                .agg(lambda x: x.mode()[0] if not x.empty else 'none')
+                .reset_index()
+                .rename(columns={outlet_col: 'shop_name'}),
+                columns=[voucher_col], prefix='camp'
+            )
+            df = df.merge(dummies, on=['shop_name', 'month_year'], how='left').fillna(0)
+
     # Campaign source dummy (brand vs mall)
     src_col = find_col(campaign, ['campaign_source', 'campaign_type'])
     if src_col and level in ('monthly', 'panel'):
@@ -234,7 +265,7 @@ def build_regression_dataset(campaign: pd.DataFrame,
             df['is_brand_campaign'] = (
                 df[src_col].astype(str).str.lower().str.contains('brand')
             ).astype(int)
- 
+
     # Ensure target columns exist
     for t in TARGETS:
         if t not in df.columns:
@@ -253,15 +284,20 @@ FEATURE_CANDIDATES = [
 ]
  
 def select_features(df: pd.DataFrame, target: str) -> list[str]:
-    """Auto-select available numeric feature columns (exclude target & identifiers)."""
     exclude = {'month_year', 'shop_name', 'gto_amount', 'gto_rent',
                'gto_reporting_month', 'lease_status'}
-    feats = [c for c in FEATURE_CANDIDATES
-             if c in df.columns and c != target and c not in exclude]
-    # Drop if collinear with campaign_cost (which already encodes points_issued)
-    if 'campaign_cost' in feats and 'points_issued' in feats:
-        feats.remove('points_issued')   # campaign_cost is the monetised version
-    return feats
+    base_feats = [c for c in FEATURE_CANDIDATES
+                  if c in df.columns and c != target and c not in exclude]
+    camp_dummies = [c for c in df.columns if c.startswith('camp_') and c != target]
+    
+    # Remove is_brand_campaign if individual campaign dummies exist
+    if camp_dummies and 'is_brand_campaign' in base_feats:
+        base_feats.remove('is_brand_campaign')
+    
+    if 'campaign_cost' in base_feats and 'points_issued' in base_feats:
+        base_feats.remove('points_issued')
+    
+    return base_feats + camp_dummies
  
  
 def run_ols(df: pd.DataFrame, target: str, features: list[str]) -> dict:
