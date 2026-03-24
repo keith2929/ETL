@@ -186,7 +186,6 @@ def run_pipeline(config_file: str, log_queue: queue.Queue):
     log_queue.put(f"__EXIT__{process.returncode}")
 
 
-# ── FIX 1: compute the final match the pipeline will use — mirrors pipeline logic exactly ──
 def compute_final_match(row) -> str:
     confirmed = str(row.get('confirmed_gto_name', '')).strip()
     suggested = str(row.get('suggested_gto_name', '')).strip()
@@ -198,16 +197,8 @@ def compute_final_match(row) -> str:
 
 
 def prepare_mapping_display(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Returns a display-ready copy of the mapping df:
-      - Auto-fills confirmed_gto_name for auto-matched rows that have a blank confirmed
-        so exact/fuzzy rows never show a blank confirmed field.
-      - Adds final_match column showing exactly what the pipeline will use.
-    Does NOT write to disk.
-    """
     df = df_raw.copy()
     AUTO_MATCHED = {'exact', 'fuzzy', 'code_match', 'combined_exact', 'combined_fuzzy'}
-
     fill_mask = (
         df['method'].isin(AUTO_MATCHED) &
         (df['confirmed_gto_name'].astype(str).str.strip().isin(['', 'nan'])) &
@@ -477,10 +468,6 @@ with tab_config:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — SHOP MAPPING
-# FIXES:
-#   1. Blanks shown as exact — auto-fill confirmed_gto_name on load & display
-#   2. After save, table reloads cleanly from disk (mapping_just_saved flag)
-#   3. New "Final Matches" summary showing exactly what the pipeline will use
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_mapping:
     import streamlit.components.v1 as components
@@ -491,28 +478,22 @@ with tab_mapping:
     if not mapping_path:
         st.warning("shop_mapping path not set in config.")
     else:
-        # FIX 2: clear the just-saved flag on this render pass (drag_matches already
-        # cleared on save, so df_map_raw below reads fresh from disk)
         if st.session_state.mapping_just_saved:
             st.session_state.mapping_just_saved = False
 
-        # Always read fresh from disk
         df_map_raw = load_shop_mapping(mapping_path)
 
         if df_map_raw.empty:
             st.info("No shop mapping file yet — run the pipeline first to generate it.")
         else:
-            # Apply any in-session drag-drop changes before display prep
             for camp_name, gto_name in st.session_state.drag_matches.items():
                 mask = df_map_raw['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
                 df_map_raw.loc[mask, 'confirmed_gto_name'] = gto_name
                 df_map_raw.loc[mask, 'method']             = 'confirmed'
                 df_map_raw.loc[mask, 'gto_name']           = gto_name
 
-            # FIX 1: auto-fill blanks and compute final_match for display
             df_map = prepare_mapping_display(df_map_raw)
 
-            # ── Metrics ───────────────────────────────────────────────────
             method_counts = df_map['method'].value_counts().to_dict()
             all_methods   = ['confirmed','code_match','combined_exact','combined_fuzzy',
                              'exact','fuzzy','unmatched','gto_only']
@@ -526,9 +507,6 @@ with tab_mapping:
 
             st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
 
-            # ══════════════════════════════════════════════════════════════
-            # FIX 3: FINAL MATCHES SUMMARY
-            # ══════════════════════════════════════════════════════════════
             campaign_only = df_map[df_map['method'] != 'gto_only'].copy()
             n_unmatched   = int((campaign_only['final_match'] == '').sum())
             n_resolved    = int((campaign_only['final_match'] != '').sum())
@@ -585,7 +563,6 @@ with tab_mapping:
 
             st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
 
-            # ── Drag-and-drop widget ───────────────────────────────────────
             gto_only_rows    = df_map[df_map['method'] == 'gto_only'].copy()
             campaign_rows_df = df_map[df_map['method'] != 'gto_only'].copy()
 
@@ -611,7 +588,6 @@ with tab_mapping:
                 if r and str(r).strip() not in ('', 'nan')
             ])
 
-            # ── Pending session matches ────────────────────────────────────
             if st.session_state.drag_matches:
                 st.markdown("**Pending matches (unsaved):**")
                 for camp_key, gto_val in list(st.session_state.drag_matches.items()):
@@ -623,7 +599,6 @@ with tab_mapping:
                         st.rerun()
                 st.markdown("---")
 
-            # ── Unmatched campaigns ────────────────────────────────────────
             _matched_keys = {k.strip().lower() for k in st.session_state.drag_matches}
             _unmatched = [
                 x for x in all_campaign_list
@@ -651,8 +626,6 @@ with tab_mapping:
             else:
                 st.success("✅ All campaigns are matched!")
 
-
-            # ── All Mappings editable table ────────────────────────────────
             st.markdown("---")
             st.markdown("#### 📋 All Mappings")
             st.caption(
@@ -683,7 +656,6 @@ with tab_mapping:
                 if isinstance(edited, dict):
                     edited = pd.DataFrame(edited)
 
-                # Merge edits back onto the full raw df
                 save_df = df_map_raw.copy()
                 for _, erow in edited.iterrows():
                     camp = str(erow.get('campaign_name', '')).strip().lower()
@@ -696,15 +668,12 @@ with tab_mapping:
                         save_df.loc[mask, 'method']             = 'confirmed'
                         save_df.loc[mask, 'gto_name']           = conf
 
-                # Apply drag matches on top
                 for camp_name, gto_name in st.session_state.drag_matches.items():
                     mask = save_df['campaign_name'].str.strip().str.lower() == camp_name.strip().lower()
                     save_df.loc[mask, 'confirmed_gto_name'] = gto_name
                     save_df.loc[mask, 'method']             = 'confirmed'
                     save_df.loc[mask, 'gto_name']           = gto_name
 
-                # Auto-fill confirmed_gto_name for auto-matched rows before writing to disk
-                # so the saved file is also clean — no blank confirmed on exact/fuzzy rows
                 AUTO_MATCHED = {'exact', 'fuzzy', 'code_match', 'combined_exact', 'combined_fuzzy'}
                 fill_mask = (
                     save_df['method'].isin(AUTO_MATCHED) &
@@ -713,7 +682,6 @@ with tab_mapping:
                 )
                 save_df.loc[fill_mask, 'confirmed_gto_name'] = save_df.loc[fill_mask, 'suggested_gto_name']
 
-                # Remove gto_only rows whose name is now used as a confirmed match
                 confirmed_set = set(
                     save_df.loc[~save_df['confirmed_gto_name'].astype(str).str.strip().isin(['', 'nan']),
                                 'confirmed_gto_name'].astype(str).str.strip().str.lower()
@@ -725,11 +693,9 @@ with tab_mapping:
                 )].reset_index(drop=True)
                 removed  = before - len(save_df)
 
-                # Drop computed column before writing
                 save_df  = save_df.drop(columns=['final_match'], errors='ignore')
                 save_shop_mapping(mapping_path, save_df)
 
-                # FIX 2: signal clean reload; clear in-session state
                 st.session_state.drag_matches       = {}
                 st.session_state.mapping_editor_v  += 1
                 st.session_state.mapping_just_saved = True
@@ -868,7 +834,7 @@ with tab_ts:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — REGRESSION
+# TAB 6 — REGRESSION  (OLS · Stepwise · Ratio-OLS · Ridge · Lasso · PCA · Logit)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_reg:
     paths_reg    = load_config(selected_config)
@@ -887,30 +853,45 @@ with tab_reg:
         st.info("No regression results found in file.")
         st.stop()
 
+    # ── Model type labels → internal keys ──────────────────────────────────
+    MODEL_TYPES = {
+        "OLS (full)":        "full_model",
+        "OLS (stepwise)":    "stepwise_model",
+        "OLS (ratio feats)": "ratio_model",
+        "Ridge":             "ridge_model",
+        "Lasso":             "lasso_model",
+        "PCA-OLS":           "pca_model",
+        "Binary Logit":      "logit_model",
+    }
+
+    # ── Summary table ───────────────────────────────────────────────────────
     st.markdown("### 📊 Model Comparison Summary")
-    st.caption("All regression models across monthly / outlet / panel levels, full and stepwise.")
+    st.caption("All model types across monthly / outlet / panel levels.")
     summary_rows = lr.get('summary', [])
     if summary_rows:
         df_sum = pd.DataFrame(summary_rows)
         display_cols = [c for c in ['model_key','model_type','level','target',
-                                    'r_squared','adj_r_squared','f_pvalue','n_obs','cv_rmse','cv_r2']
+                                    'r_squared','adj_r_squared','f_pvalue','n_obs',
+                                    'cv_rmse','cv_r2','auc']
                         if c in df_sum.columns]
         st.dataframe(df_sum[display_cols], use_container_width=True, hide_index=True,
                      column_config={
-                         'r_squared':     st.column_config.ProgressColumn('R²',     min_value=0, max_value=1, format='%.3f'),
-                         'adj_r_squared': st.column_config.ProgressColumn('Adj R²', min_value=0, max_value=1, format='%.3f'),
-                         'cv_r2':         st.column_config.ProgressColumn('CV R²',  min_value=0, max_value=1, format='%.3f'),
+                         'r_squared':     st.column_config.ProgressColumn('R² / Pseudo-R²', min_value=0, max_value=1, format='%.3f'),
+                         'adj_r_squared': st.column_config.ProgressColumn('Adj R²',         min_value=0, max_value=1, format='%.3f'),
+                         'cv_r2':         st.column_config.ProgressColumn('CV R² / AUC',    min_value=0, max_value=1, format='%.3f'),
+                         'auc':           st.column_config.ProgressColumn('AUC',             min_value=0, max_value=1, format='%.3f'),
                      })
         valid = df_sum.dropna(subset=['adj_r_squared'])
         if not valid.empty:
             best = valid.loc[valid['adj_r_squared'].idxmax()]
             st.markdown(
-                f'<div class="reg-insight">🏆 Best model: <strong>{best["model_key"]}</strong> '
+                f'<div class="reg-insight">🏆 Best model by Adj-R²: <strong>{best["model_key"]}</strong> '
                 f'({best["model_type"]}) — Adj-R² = <strong>{best["adj_r_squared"]:.3f}</strong>, '
-                f'CV-R² = {best.get("cv_r2") or "—"}</div>', unsafe_allow_html=True)
+                f'CV metric = {best.get("cv_r2") or "—"}</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 🔍 Explore Individual Models")
+
     model_keys = [k for k in lr.keys() if k != 'summary']
     if not model_keys:
         st.warning("No individual model results found.")
@@ -918,81 +899,309 @@ with tab_reg:
 
     col_sel1, col_sel2 = st.columns(2)
     with col_sel1:
-        selected_key = st.selectbox("Select model", model_keys,
-                                    format_func=lambda k: k.replace('_',' ').title(), key="reg_model_key")
+        selected_key = st.selectbox("Dataset / Level", model_keys,
+                                    format_func=lambda k: k.replace('_', ' ').title(),
+                                    key="reg_model_key")
     with col_sel2:
-        model_type = st.radio("Model type", ["full_model","stepwise_model"],
-                              format_func=lambda x: "Full (all features)" if x=="full_model" else "Stepwise (significant only)",
-                              horizontal=True, key="reg_model_type")
+        model_label = st.selectbox("Model type", list(MODEL_TYPES.keys()),
+                                   key="reg_model_type_label")
+    model_type = MODEL_TYPES[model_label]
 
     model = lr.get(selected_key, {}).get(model_type, {})
+
+    if not model:
+        st.warning(f"No results for {selected_key} / {model_label} — re-run the pipeline.")
+        st.stop()
     if model.get('error'):
         st.error(f"Model error: {model['error']}")
         st.stop()
+
     if model.get('insight'):
         st.markdown(f'<div class="reg-insight">💡 {model["insight"]}</div>', unsafe_allow_html=True)
 
+    # ── VIF warning / reassurance banner ───────────────────────────────────
+    vif_data = model.get('vif', [])
+    if vif_data and model_label not in ('Ridge', 'Lasso', 'PCA-OLS', 'Binary Logit'):
+        df_vif_check = pd.DataFrame(vif_data)
+        if not df_vif_check.empty and 'vif' in df_vif_check.columns:
+            max_vif = df_vif_check['vif'].dropna().max()
+            if max_vif and max_vif > 10:
+                st.error(f"❌ High multicollinearity (max VIF = {max_vif:.1f}). "
+                         "Switch to Ridge, Lasso, PCA-OLS, or OLS (ratio feats) to reduce.")
+            elif max_vif and max_vif > 5:
+                st.warning(f"⚠️ Moderate multicollinearity (max VIF = {max_vif:.1f}). "
+                           "Ridge or PCA-OLS may give more stable estimates.")
+    elif model_label == 'PCA-OLS':
+        st.success("✅ VIF = 1.0 for all principal components — multicollinearity fully eliminated.")
+    elif model_label in ('Ridge', 'Lasso'):
+        st.info(f"ℹ️ {model_label} regularisation handles multicollinearity by design — VIF not applicable.")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # BINARY LOGIT
+    # ══════════════════════════════════════════════════════════════════════
+    if model_label == 'Binary Logit':
+        binar = model.get('binarisation', {})
+        st.markdown("#### 🎯 Target Binarisation")
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Threshold",       f"{binar.get('threshold', 0):,.0f}")
+        b2.metric("Class 0 (below)", binar.get('class_0_count', '—'))
+        b3.metric("Class 1 (above)", binar.get('class_1_count', '—'))
+        st.caption(f"0 = {binar.get('label_0','')}  |  1 = {binar.get('label_1','')}")
+
+        st.markdown("---")
+        st.markdown("#### 📐 Model Fit")
+        fit = model.get('model_fit', {}); cv = model.get('cross_validation', {})
+        cls = model.get('classification', {})
+        lm1, lm2, lm3, lm4, lm5 = st.columns(5)
+        lm1.metric("Pseudo-R² (McFadden)", f"{fit.get('pseudo_r2') or 0:.3f}")
+        lm2.metric("AUC",                  f"{cls.get('auc') or 0:.3f}")
+        lm3.metric("Accuracy",             f"{(cls.get('accuracy') or 0):.1%}")
+        lm4.metric("F1-Score",             f"{cls.get('f1_score') or 0:.3f}")
+        lm5.metric("CV AUC",               f"{cv.get('cv_auc_mean') or 0:.3f}" if cv.get('cv_auc_mean') else "—")
+
+        roc = model.get('roc', {})
+        if roc.get('roc_points'):
+            st.markdown("#### 📈 ROC Curve")
+            df_roc = pd.DataFrame(roc['roc_points']).sort_values('fpr').set_index('fpr')[['tpr']]
+            st.line_chart(df_roc)
+            st.caption(f"AUC = {roc.get('auc') or 0:.3f}  —  "
+                       f"{'Good discrimination ✅' if (roc.get('auc') or 0) > 0.7 else 'Moderate discrimination ⚠️'}")
+
+        cm = cls.get('confusion_matrix')
+        if cm:
+            st.markdown("#### 🔲 Confusion Matrix")
+            df_cm = pd.DataFrame(cm,
+                                 index=['Actual 0 (below)', 'Actual 1 (above)'],
+                                 columns=['Predicted 0', 'Predicted 1'])
+            st.dataframe(df_cm, use_container_width=False)
+
+        st.markdown("#### 📋 Odds Ratios")
+        st.caption("OR > 1 → feature increases P(above median GTO). OR < 1 → decreases it. Green = significant.")
+        coef_table = model.get('coef_table', [])
+        if coef_table:
+            df_or   = pd.DataFrame(coef_table)
+            or_cols = [c for c in ['feature','odds_ratio','log_odds','p_value',
+                                   'ci_lower_or','ci_upper_or','significant'] if c in df_or.columns]
+            def _hl_logit(row):
+                return ['background-color: #1a2e1a']*len(row) if row.get('significant') else ['']*len(row)
+            st.dataframe(df_or[or_cols].style.apply(_hl_logit, axis=1),
+                         use_container_width=True, hide_index=True)
+
+        mfx = model.get('marginal_effects', [])
+        if mfx:
+            st.markdown("#### ∂ Marginal Effects (at means)")
+            st.caption("Change in P(above-median GTO) per 1-std-dev increase in each feature.")
+            st.dataframe(pd.DataFrame(mfx), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        if reg_xlsx and Path(reg_xlsx).exists():
+            with open(reg_xlsx, 'rb') as fh:
+                st.download_button("⬇️  Download Regression Summary (.xlsx)", data=fh.read(),
+                                   file_name='linear_regression_summary.xlsx',
+                                   mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                   type='primary')
+        st.stop()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # RIDGE / LASSO
+    # ══════════════════════════════════════════════════════════════════════
+    if model_label in ('Ridge', 'Lasso'):
+        st.markdown("#### 📐 Model Fit")
+        fit = model.get('model_fit', {}); cv = model.get('cross_validation', {})
+        rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+        rc1.metric("R²",       f"{fit.get('r_squared') or 0:.3f}")
+        rc2.metric("Adj R²",   f"{fit.get('adj_r_squared') or 0:.3f}")
+        rc3.metric("Best α",   f"{fit.get('best_alpha') or 0:.4f}")
+        rc4.metric("CV RMSE",  f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
+        rc5.metric("CV R²",    f"{cv.get('cv_r2_mean') or 0:.3f}" if cv.get('cv_r2_mean') else "—")
+
+        alpha_info = model.get('alpha_search', {})
+        if alpha_info:
+            st.caption(f"ℹ️ {alpha_info.get('note', '')}. Optimal α chosen by 5-fold CV from 50 candidates.")
+
+        if model_label == 'Lasso':
+            sel  = model.get('selected_features', [])
+            zero = model.get('zeroed_features', [])
+            lc1, lc2 = st.columns(2)
+            lc1.markdown(f"**✅ Retained ({len(sel)}):** {', '.join(sel) if sel else 'none'}")
+            lc2.markdown(f"**🚫 Zeroed ({len(zero)}):** {', '.join(zero) if zero else 'none'}")
+
+        st.markdown("#### 📋 Coefficients (standardised magnitude)")
+        coef_table = model.get('coef_table', [])
+        if coef_table:
+            df_coef = pd.DataFrame(coef_table)
+            c_cols  = [c for c in ['feature','coef','abs_coef','selected'] if c in df_coef.columns]
+            cc1, cc2 = st.columns([2, 3])
+            with cc1:
+                plot_src = df_coef[df_coef['feature'] != 'const'] if 'const' in df_coef.get('feature', pd.Series()).values else df_coef
+                if 'feature' in plot_src.columns and 'coef' in plot_src.columns:
+                    st.bar_chart(plot_src.set_index('feature')['coef'])
+            with cc2:
+                st.dataframe(df_coef[c_cols], use_container_width=True, hide_index=True)
+
+        residuals = model.get('residuals', [])
+        if residuals:
+            st.markdown("#### 📉 Residual Diagnostics")
+            df_resid = pd.DataFrame(residuals)
+            cr1, cr2 = st.columns(2)
+            with cr1:
+                st.markdown("**Fitted vs Residuals**")
+                st.scatter_chart(df_resid, x='fitted', y='residual', height=260)
+            with cr2:
+                st.markdown("**Std Residuals Distribution**")
+                st.bar_chart(df_resid['std_resid'].value_counts(bins=14).sort_index(), height=260)
+
+        st.markdown("---")
+        if reg_xlsx and Path(reg_xlsx).exists():
+            with open(reg_xlsx, 'rb') as fh:
+                st.download_button("⬇️  Download Regression Summary (.xlsx)", data=fh.read(),
+                                   file_name='linear_regression_summary.xlsx',
+                                   mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                   type='primary')
+        st.stop()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PCA-OLS
+    # ══════════════════════════════════════════════════════════════════════
+    if model_label == 'PCA-OLS':
+        st.markdown("#### 📐 Model Fit")
+        fit = model.get('model_fit', {}); cv = model.get('cross_validation', {})
+        pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+        pc1.metric("R²",                 f"{fit.get('r_squared') or 0:.3f}")
+        pc2.metric("Adj R²",             f"{fit.get('adj_r_squared') or 0:.3f}")
+        pc3.metric("Components used",    fit.get('n_components_used', '—'))
+        pc4.metric("Variance explained", f"{fit.get('variance_explained_pct') or 0:.1f}%")
+        pc5.metric("CV R²",              f"{cv.get('cv_r2_mean') or 0:.3f}" if cv.get('cv_r2_mean') else "—")
+        st.caption(f"✅ {fit.get('vif_note', 'VIF = 1.0 for all components by construction')}")
+
+        st.markdown("#### 🔢 Principal Component Coefficients")
+        coef_table = model.get('coef_table', [])
+        if coef_table:
+            df_pc   = pd.DataFrame(coef_table)
+            pc_cols = [c for c in ['component','coef','p_value','significant','variance_explained_pct']
+                       if c in df_pc.columns]
+            st.dataframe(df_pc[pc_cols], use_container_width=True, hide_index=True)
+
+        st.markdown("#### 🗺️ Feature Loadings  (original features → principal components)")
+        st.caption("Large |value| = the feature strongly shapes that component. Blue = positive loading, red = negative.")
+        loadings = model.get('loadings', [])
+        if loadings:
+            df_load = pd.DataFrame(loadings)
+            if 'feature' in df_load.columns:
+                df_load = df_load.set_index('feature')
+            st.dataframe(df_load.style.background_gradient(cmap='RdBu', axis=None),
+                         use_container_width=True)
+
+        st.markdown("#### 🔄 Implied Original-Feature Coefficients")
+        st.caption("Approximate contribution of each original feature in the final model (via PC loadings × PC coefficients).")
+        implied = model.get('implied_coefs', [])
+        if implied:
+            df_imp = pd.DataFrame(implied)
+            ic1, ic2 = st.columns([2, 3])
+            with ic1:
+                if 'feature' in df_imp.columns and 'implied_coefficient' in df_imp.columns:
+                    st.bar_chart(df_imp.set_index('feature')['implied_coefficient'])
+            with ic2:
+                st.dataframe(df_imp, use_container_width=True, hide_index=True)
+
+        residuals = model.get('residuals', [])
+        if residuals:
+            st.markdown("#### 📉 Residual Diagnostics")
+            df_resid = pd.DataFrame(residuals)
+            cr1, cr2 = st.columns(2)
+            with cr1:
+                st.markdown("**Fitted vs Residuals**")
+                st.scatter_chart(df_resid, x='fitted', y='residual', height=260)
+                st.caption("Ideal: randomly scattered around 0.")
+            with cr2:
+                st.markdown("**Std Residuals Distribution**")
+                st.bar_chart(df_resid['std_resid'].value_counts(bins=12).sort_index(), height=260)
+                st.caption("Ideal: bell-shaped around 0.")
+
+        st.markdown("---")
+        if reg_xlsx and Path(reg_xlsx).exists():
+            with open(reg_xlsx, 'rb') as fh:
+                st.download_button("⬇️  Download Regression Summary (.xlsx)", data=fh.read(),
+                                   file_name='linear_regression_summary.xlsx',
+                                   mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                   type='primary')
+        st.stop()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # OLS MODELS  (full / stepwise / ratio)
+    # ══════════════════════════════════════════════════════════════════════
+    if model_label == 'OLS (ratio feats)':
+        st.info("ℹ️ This model replaces raw correlated inputs with ratio features: "
+                "spend_per_redemption, points_per_redemption, cost_efficiency. "
+                "VIF should be substantially lower than OLS (full).")
+
     st.markdown("#### Model Fit")
     fit = model.get('model_fit', {}); cv = model.get('cross_validation', {})
-    mc1,mc2,mc3,mc4,mc5,mc6 = st.columns(6)
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
     mc1.metric("R²",        f"{fit.get('r_squared') or 0:.3f}")
     mc2.metric("Adj R²",    f"{fit.get('adj_r_squared') or 0:.3f}")
     mc3.metric("F p-value", f"{fit.get('f_pvalue') or 0:.4f}")
     mc4.metric("N obs",     fit.get('n_obs', '—'))
     mc5.metric("CV RMSE",   f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
-    mc6.metric("CV R²",     f"{cv.get('cv_r2_mean') or 0:.3f}"    if cv.get('cv_r2_mean')  else "—")
+    mc6.metric("CV R²",     f"{cv.get('cv_r2_mean') or 0:.3f}" if cv.get('cv_r2_mean') else "—")
     dw = fit.get('dw_stat')
     if dw is not None:
-        st.caption(f"Durbin-Watson: {dw:.3f}  —  {'✅ No autocorrelation' if 1.5 < dw < 2.5 else '⚠️ Possible autocorrelation'}")
+        st.caption(f"Durbin-Watson: {dw:.3f}  —  "
+                   f"{'✅ No autocorrelation' if 1.5 < dw < 2.5 else '⚠️ Possible autocorrelation'}")
 
     st.markdown("---")
     st.markdown("#### Coefficients (standardised)")
     coef_table = model.get('coef_table', [])
     if coef_table:
         df_coef      = pd.DataFrame(coef_table)
-        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy()
-        col_chart, col_table = st.columns([2,3])
+        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy() if 'const' in df_coef['feature'].values else df_coef
+        col_chart, col_table = st.columns([2, 3])
         with col_chart:
             if not df_coef_plot.empty and 'coef' in df_coef_plot.columns:
                 st.markdown("**Coefficient magnitudes**")
                 st.bar_chart(df_coef_plot.set_index('feature')['coef'])
         with col_table:
-            dcols = [c for c in ['feature','coef','std_err','t_stat','p_value','ci_lower','ci_upper','significant']
-                     if c in df_coef.columns]
-            def highlight_sig(row):
+            dcols = [c for c in ['feature','coef','std_err','t_stat','p_value',
+                                  'ci_lower','ci_upper','significant'] if c in df_coef.columns]
+            def _hl_ols(row):
                 return ['background-color: #1a2e1a']*len(row) if row.get('significant') is True else ['']*len(row)
-            st.dataframe(df_coef[dcols].style.apply(highlight_sig, axis=1), use_container_width=True, hide_index=True)
-        st.caption("✅ Green rows = significant at p < 0.05. Standardised β — comparable in magnitude.")
+            st.dataframe(df_coef[dcols].style.apply(_hl_ols, axis=1),
+                         use_container_width=True, hide_index=True)
+        st.caption("✅ Green = significant at p < 0.05. Standardised β — comparable in magnitude.")
 
     st.markdown("---")
     vif_data = model.get('vif', [])
     if vif_data:
         st.markdown("#### Multicollinearity Check (VIF)")
         df_vif = pd.DataFrame(vif_data)
-        cv1, cv2 = st.columns([1,2])
+        cv1, cv2 = st.columns([1, 2])
         with cv1:
             st.dataframe(df_vif, use_container_width=True, hide_index=True)
         with cv2:
             st.caption("VIF < 5 → ✅  |  5–10 → ⚠️ Moderate  |  > 10 → ❌ High")
             if not df_vif.empty and 'vif' in df_vif.columns:
                 max_vif = df_vif['vif'].dropna().max()
-                if max_vif and max_vif > 10:   st.warning(f"⚠️ Max VIF = {max_vif:.1f} — multicollinearity detected.")
-                elif max_vif and max_vif > 5:  st.warning(f"⚠️ Max VIF = {max_vif:.1f} — moderate multicollinearity.")
-                else:                          st.success("✅ All VIF values look good (< 5).")
+                if max_vif and max_vif > 10:
+                    st.error(f"❌ Max VIF = {max_vif:.1f}. Recommend switching to Ridge, PCA-OLS, or OLS (ratio feats).")
+                elif max_vif and max_vif > 5:
+                    st.warning(f"⚠️ Max VIF = {max_vif:.1f} — moderate. Ridge or PCA-OLS recommended.")
+                else:
+                    st.success("✅ All VIF values good (< 5).")
 
     st.markdown("---")
-    if model_type == 'stepwise_model':
-        dropped = model.get('stepwise_dropped', []); final = model.get('stepwise_final_features', [])
+    if model_label == 'OLS (stepwise)':
+        dropped = model.get('stepwise_dropped', [])
+        final   = model.get('stepwise_final_features', [])
         if dropped:
             st.markdown("#### Stepwise Feature Selection")
             sd1, sd2 = st.columns(2)
             with sd1:
-                st.markdown("**Dropped features** (p ≥ 0.10)")
+                st.markdown("**Dropped (p ≥ 0.10)**")
                 st.dataframe(pd.DataFrame(dropped), use_container_width=True, hide_index=True)
             with sd2:
-                st.markdown("**Retained features**")
+                st.markdown("**Retained**")
                 st.dataframe(pd.DataFrame({'feature': final}), use_container_width=True, hide_index=True)
-        st.markdown("---")
+            st.markdown("---")
 
     residuals = model.get('residuals', [])
     if residuals:
