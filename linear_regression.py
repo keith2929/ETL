@@ -382,14 +382,16 @@ def run_ols(df: pd.DataFrame, target: str, features: list) -> dict:
         result['vif'] = []
 
     try:
-        kf = KFold(n_splits=5, shuffle=True, random_state=42)
-        cv_rmse, cv_mae, cv_r2 = [], [], []
-        X_np, y_np = X_scaled.values, y.values
+        kf = KFold(n_splits=min(5, len(subset)), shuffle=True, random_state=42)
+        cv_rmse, cv_r2 = [], []
+
+        X_np = X_pca
+        y_np = y.values
+
         for tr, te in kf.split(X_np):
             m    = sm.OLS(y_np[tr], sm.add_constant(X_np[tr])).fit()
             pred = m.predict(sm.add_constant(X_np[te]))
-            cv_rmse.append(mean_squared_error(y_np[te], pred, squared=False))
-            cv_mae.append(mean_absolute_error(y_np[te], pred))
+            cv_rmse.append(np.sqrt(mean_squared_error(y_np[te], pred)))
             cv_r2.append(r2_score(y_np[te], pred))
         result['cross_validation'] = {
             'cv_rmse_mean': safe_float(np.mean(cv_rmse)),
@@ -470,7 +472,7 @@ def run_ridge(df: pd.DataFrame, target: str, features: list) -> dict:
 
     # Cross-validated alpha selection
     ridge_cv = RidgeCV(alphas=RIDGE_ALPHAS, cv=min(5, len(subset)),
-                       scoring='r2', store_cv_values=True)
+                       scoring='r2')
     ridge_cv.fit(X_scaled, y)
 
     best_alpha = float(ridge_cv.alpha_)
@@ -483,7 +485,7 @@ def run_ridge(df: pd.DataFrame, target: str, features: list) -> dict:
         from sklearn.linear_model import Ridge as RidgeSK
         m    = RidgeSK(alpha=best_alpha).fit(X_scaled[tr], y.values[tr])
         pred = m.predict(X_scaled[te])
-        cv_rmse.append(mean_squared_error(y.values[te], pred, squared=False))
+        cv_rmse.append(np.sqrt(mean_squared_error(y.values[te], pred)))
         cv_r2.append(r2_score(y.values[te], pred))
 
     pred_all = ridge_cv.predict(X_scaled)
@@ -565,7 +567,7 @@ def run_lasso(df: pd.DataFrame, target: str, features: list) -> dict:
         from sklearn.linear_model import Lasso as LassoSK
         m    = LassoSK(alpha=best_alpha, max_iter=10000).fit(X_scaled[tr], y.values[tr])
         pred = m.predict(X_scaled[te])
-        cv_rmse.append(mean_squared_error(y.values[te], pred, squared=False))
+        cv_rmse.append(np.sqrt(mean_squared_error(y.values[te], pred)))
         cv_r2.append(r2_score(y.values[te], pred))
 
     pred_all  = lasso_cv.predict(X_scaled)
@@ -699,10 +701,10 @@ def run_pca_regression(df: pd.DataFrame, target: str, features: list) -> dict:
     try:
         kf = KFold(n_splits=min(5, len(subset)), shuffle=True, random_state=42)
         cv_rmse, cv_r2 = [], []
-        for tr, te in kf.split(X_pca):
-            m    = sm.OLS(y.values[tr], sm.add_constant(X_pca[tr])).fit()
-            pred = m.predict(sm.add_constant(X_pca[te]))
-            cv_rmse.append(mean_squared_error(y.values[te], pred, squared=False))
+        for tr, te in kf.split(X_np):
+            m    = sm.OLS(y_np[tr], sm.add_constant(X_np[tr])).fit()
+            pred = m.predict(sm.add_constant(X_np[te]))
+            cv_rmse.append(np.sqrt(mean_squared_error(y_np[te], pred)))
             cv_r2.append(r2_score(y.values[te], pred))
         result['cross_validation'] = {
             'cv_rmse_mean': safe_float(np.mean(cv_rmse)),
