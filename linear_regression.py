@@ -111,25 +111,55 @@ def load_data(data_folder: str, mapping_file: str = ''):
            else pd.read_csv(gto_path))
 
     VALID_METHODS = {'exact', 'fuzzy', 'confirmed', 'code_match', 'combined_exact', 'combined_fuzzy'}
+    # Build a campaign_name → gto_name lookup for use in build_regression_dataset
+    campaign_to_gto = {}
     if mapping_file and os.path.exists(mapping_file):
         try:
             mdf = pd.read_excel(mapping_file, sheet_name='mapping')
-            mdf['campaign_name'] = mdf['campaign_name'].astype(str).str.strip().str.lower()
-            mdf['gto_name']      = mdf['gto_name'].astype(str).str.strip().str.lower()
-            mdf['method']        = mdf['method'].astype(str).str.strip().str.lower()
-            valid_map      = mdf[mdf['method'].isin(VALID_METHODS)]
+            mdf['campaign_name']      = mdf['campaign_name'].astype(str).str.strip().str.lower()
+            mdf['method']             = mdf['method'].astype(str).str.strip().str.lower()
+            # Prefer confirmed_gto_name, fall back to gto_name
+            if 'confirmed_gto_name' in mdf.columns:
+                mdf['_resolved_gto'] = mdf['confirmed_gto_name'].astype(str).str.strip().str.lower()
+                blank = mdf['_resolved_gto'].isin(['', 'nan'])
+                mdf.loc[blank, '_resolved_gto'] = mdf.loc[blank, 'gto_name'].astype(str).str.strip().str.lower()
+            else:
+                mdf['_resolved_gto'] = mdf['gto_name'].astype(str).str.strip().str.lower()
+
+            valid_map = mdf[
+                mdf['method'].isin(VALID_METHODS) &
+                (~mdf['_resolved_gto'].isin(['', 'nan']))
+            ]
             valid_campaign = set(valid_map['campaign_name'])
-            valid_gto      = set(valid_map['gto_name'])
+            valid_gto      = set(valid_map['_resolved_gto'])
+
+            # Build lookup: campaign outlet name → matched GTO shop name
+            campaign_to_gto = dict(zip(valid_map['campaign_name'], valid_map['_resolved_gto']))
+
+            print(f"  📋 Mapping loaded: {len(valid_map)} valid matches, "
+                  f"{len(valid_campaign)} campaign outlets, {len(valid_gto)} GTO shops")
+
             if 'outlet_name' in campaign.columns:
+                before = len(campaign)
                 campaign = campaign[
                     campaign['outlet_name'].str.strip().str.lower().isin(valid_campaign)
                 ].copy()
+                print(f"  🔍 Campaign filtered: {before:,} → {len(campaign):,} rows "
+                      f"({before - len(campaign):,} unmatched outlets removed)")
+
             if 'shop_name' in gto.columns:
+                before = len(gto)
                 gto = gto[
                     gto['shop_name'].str.strip().str.lower().isin(valid_gto)
                 ].copy()
+                print(f"  🔍 GTO filtered: {before:,} → {len(gto):,} rows "
+                      f"({before - len(gto):,} unmatched shops removed)")
+
         except Exception as e:
             print(f"⚠️ mapping filter failed: {e}")
+
+    # Attach the lookup to campaign df so build_regression_dataset can use it
+    campaign.attrs['campaign_to_gto'] = campaign_to_gto
 
     if 'month_year' not in gto.columns and 'gto_reporting_month' in gto.columns:
         gto['month_year'] = pd.to_datetime(
@@ -196,56 +226,96 @@ def build_regression_dataset(campaign: pd.DataFrame,
     if amt_col:  agg_dict['txn_amount']    = (amt_col,  'sum')
     if rcpt_col: agg_dict['redemptions']   = (rcpt_col, 'nunique')
 
+    # ── Retrieve campaign→GTO name lookup (built in load_data) ──────────────
+    campaign_to_gto = campaign.attrs.get('campaign_to_gto', {})
+
+    def _norm_my(series: pd.Series) -> pd.Series:
+        """Normalise any month-year string to 'Jan-2024' format."""
+        parsed = pd.to_datetime(series, format='%b-%Y', errors='coerce')
+        mask = parsed.isna()
+        if mask.any():
+            parsed[mask] = pd.to_datetime(series[mask], errors='coerce')
+        return parsed.dt.strftime('%b-%Y')
+
+    def _apply_shop_map(camp: pd.DataFrame, col: str) -> pd.DataFrame:
+        """Replace outlet_name with the matched GTO shop name where available."""
+        if not campaign_to_gto:
+            return camp.rename(columns={col: 'shop_name'})
+        camp = camp.copy()
+        camp['shop_name'] = (
+            camp[col].str.strip().str.lower()
+            .map(campaign_to_gto)
+            .fillna(camp[col].str.strip().str.lower())
+        )
+        return camp.drop(columns=[col], errors='ignore')
+
     if level == 'monthly':
         if 'month_year' not in campaign.columns:
             print("  ⚠️  month_year missing — cannot build monthly dataset.")
             return pd.DataFrame()
+
         camp_grp = campaign.groupby('month_year').agg(**agg_dict).reset_index()
         gto_grp  = gto.groupby('month_year').agg(
             gto_amount=(gto_a_col, 'sum') if gto_a_col else ('month_year', 'count'),
             gto_rent  =(gto_r_col, 'sum') if gto_r_col else ('month_year', 'count'),
         ).reset_index()
-        # Normalise month_year format to 'Jan-2024' in both sides before merging
-        for _df in [camp_grp, gto_grp]:
-            if 'month_year' in _df.columns:
-                _df['month_year'] = pd.to_datetime(
-                    _df['month_year'], format='%b-%Y', errors='coerce'
-                ).dt.strftime('%b-%Y')
-        df = pd.merge(camp_grp, gto_grp, on='month_year', how='left')   # ← fixed: inner → left
+
+        # Normalise both sides to 'Jan-2024' before merging
+        camp_grp['month_year'] = _norm_my(camp_grp['month_year'])
+        gto_grp['month_year']  = _norm_my(gto_grp['month_year'])
+
+        df = pd.merge(camp_grp, gto_grp, on='month_year', how='left')
+        print(f"    Monthly: {len(camp_grp)} campaign months × "
+              f"{len(gto_grp)} GTO months → {len(df)} rows "
+              f"({df['gto_amount'].notna().sum() if 'gto_amount' in df.columns else '?'} with GTO data)")
 
     elif level == 'outlet':
         if not outlet_col or not shop_col:
             print("  ⚠️  outlet_name / shop_name missing — cannot build outlet dataset.")
             return pd.DataFrame()
-        camp_grp = campaign.groupby(outlet_col).agg(**agg_dict).reset_index()
-        camp_grp = camp_grp.rename(columns={outlet_col: 'shop_name'})
-        gto_grp  = gto.groupby(shop_col).agg(
+
+        # Apply shop mapping so campaign names resolve to GTO shop names
+        camp_mapped = _apply_shop_map(campaign, outlet_col)
+        camp_grp    = camp_mapped.groupby('shop_name').agg(**agg_dict).reset_index()
+        camp_grp['shop_name'] = camp_grp['shop_name'].str.strip().str.lower()
+
+        gto_grp = gto.groupby(shop_col).agg(
             gto_amount=(gto_a_col, 'sum') if gto_a_col else (shop_col, 'count'),
             gto_rent  =(gto_r_col, 'sum') if gto_r_col else (shop_col, 'count'),
         ).reset_index().rename(columns={shop_col: 'shop_name'})
-        df = pd.merge(camp_grp, gto_grp, on='shop_name', how='left')    # ← fixed: inner → left
+        gto_grp['shop_name'] = gto_grp['shop_name'].str.strip().str.lower()
+
+        df = pd.merge(camp_grp, gto_grp, on='shop_name', how='left')
+        print(f"    Outlet: {len(camp_grp)} campaign outlets × "
+              f"{len(gto_grp)} GTO shops → {len(df)} rows "
+              f"({df['gto_amount'].notna().sum() if 'gto_amount' in df.columns else '?'} with GTO data)")
 
     elif level == 'panel':
         if not outlet_col or not shop_col or 'month_year' not in campaign.columns:
             print("  ⚠️  Missing columns for panel dataset.")
             return pd.DataFrame()
-        camp_grp = campaign.groupby([outlet_col, 'month_year']).agg(**agg_dict).reset_index()
-        camp_grp = camp_grp.rename(columns={outlet_col: 'shop_name'})
-        gto_grp  = gto[[shop_col, 'month_year'] +
-                        ([gto_a_col] if gto_a_col else []) +
-                        ([gto_r_col] if gto_r_col else [])].rename(columns={shop_col: 'shop_name'})
-        # Normalise month_year format to 'Jan-2024' in both sides before merging
-        for _df in [camp_grp, gto_grp]:
-            if 'month_year' in _df.columns:
-                _df['month_year'] = pd.to_datetime(
-                    _df['month_year'], format='%b-%Y', errors='coerce'
-                ).dt.strftime('%b-%Y')
-        df = pd.merge(camp_grp, gto_grp, on=['shop_name', 'month_year'], how='left')   # ← fixed: inner → left
+
+        camp_work             = campaign.copy()
+        camp_work['month_year'] = _norm_my(camp_work['month_year'])
+        camp_mapped           = _apply_shop_map(camp_work, outlet_col)
+        camp_grp              = camp_mapped.groupby(['shop_name', 'month_year']).agg(**agg_dict).reset_index()
+        camp_grp['shop_name'] = camp_grp['shop_name'].str.strip().str.lower()
+
+        gto_work              = gto.copy()
+        gto_work['month_year'] = _norm_my(gto_work['month_year'])
+        gto_work['shop_name']  = gto_work[shop_col].str.strip().str.lower()
+        gto_cols = ['shop_name', 'month_year'] + \
+                   ([gto_a_col] if gto_a_col else []) + ([gto_r_col] if gto_r_col else [])
+        gto_grp = gto_work[gto_cols]
+
+        df = pd.merge(camp_grp, gto_grp, on=['shop_name', 'month_year'], how='left')
+        print(f"    Panel: {len(camp_grp)} outlet-months → {len(df)} rows "
+              f"({df['gto_amount'].notna().sum() if 'gto_amount' in df.columns else '?'} with GTO data)")
+
         nla_col = find_col(gto, ['nla_sqft'])
         if nla_col:
-            nla = gto[[shop_col, nla_col]].drop_duplicates().rename(
-                columns={shop_col: 'shop_name', nla_col: 'nla_sqft'})
-            df = df.merge(nla, on='shop_name', how='left')
+            nla = gto_work[['shop_name', nla_col]].drop_duplicates()
+            df  = df.merge(nla, on='shop_name', how='left')
     else:
         raise ValueError(f"Unknown level: {level}")
 
