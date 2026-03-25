@@ -205,7 +205,13 @@ def build_regression_dataset(campaign: pd.DataFrame,
             gto_amount=(gto_a_col, 'sum') if gto_a_col else ('month_year', 'count'),
             gto_rent  =(gto_r_col, 'sum') if gto_r_col else ('month_year', 'count'),
         ).reset_index()
-        df = pd.merge(camp_grp, gto_grp, on='month_year', how='inner')
+        # Normalise month_year format to 'Jan-2024' in both sides before merging
+        for _df in [camp_grp, gto_grp]:
+            if 'month_year' in _df.columns:
+                _df['month_year'] = pd.to_datetime(
+                    _df['month_year'], format='%b-%Y', errors='coerce'
+                ).dt.strftime('%b-%Y')
+        df = pd.merge(camp_grp, gto_grp, on='month_year', how='left')   # ← fixed: inner → left
 
     elif level == 'outlet':
         if not outlet_col or not shop_col:
@@ -217,7 +223,7 @@ def build_regression_dataset(campaign: pd.DataFrame,
             gto_amount=(gto_a_col, 'sum') if gto_a_col else (shop_col, 'count'),
             gto_rent  =(gto_r_col, 'sum') if gto_r_col else (shop_col, 'count'),
         ).reset_index().rename(columns={shop_col: 'shop_name'})
-        df = pd.merge(camp_grp, gto_grp, on='shop_name', how='inner')
+        df = pd.merge(camp_grp, gto_grp, on='shop_name', how='left')    # ← fixed: inner → left
 
     elif level == 'panel':
         if not outlet_col or not shop_col or 'month_year' not in campaign.columns:
@@ -228,7 +234,13 @@ def build_regression_dataset(campaign: pd.DataFrame,
         gto_grp  = gto[[shop_col, 'month_year'] +
                         ([gto_a_col] if gto_a_col else []) +
                         ([gto_r_col] if gto_r_col else [])].rename(columns={shop_col: 'shop_name'})
-        df = pd.merge(camp_grp, gto_grp, on=['shop_name', 'month_year'], how='inner')
+        # Normalise month_year format to 'Jan-2024' in both sides before merging
+        for _df in [camp_grp, gto_grp]:
+            if 'month_year' in _df.columns:
+                _df['month_year'] = pd.to_datetime(
+                    _df['month_year'], format='%b-%Y', errors='coerce'
+                ).dt.strftime('%b-%Y')
+        df = pd.merge(camp_grp, gto_grp, on=['shop_name', 'month_year'], how='left')   # ← fixed: inner → left
         nla_col = find_col(gto, ['nla_sqft'])
         if nla_col:
             nla = gto[[shop_col, nla_col]].drop_duplicates().rename(
@@ -383,15 +395,16 @@ def run_ols(df: pd.DataFrame, target: str, features: list) -> dict:
 
     try:
         kf = KFold(n_splits=min(5, len(subset)), shuffle=True, random_state=42)
-        cv_rmse, cv_r2 = [], []
+        cv_rmse, cv_mae, cv_r2 = [], [], []
 
-        X_np = X_pca
+        X_np = X_scaled.values   # ← fixed: was X_pca (undefined in this function)
         y_np = y.values
 
         for tr, te in kf.split(X_np):
             m    = sm.OLS(y_np[tr], sm.add_constant(X_np[tr])).fit()
             pred = m.predict(sm.add_constant(X_np[te]))
             cv_rmse.append(np.sqrt(mean_squared_error(y_np[te], pred)))
+            cv_mae.append(mean_absolute_error(y_np[te], pred))   # ← fixed: was undefined
             cv_r2.append(r2_score(y_np[te], pred))
         result['cross_validation'] = {
             'cv_rmse_mean': safe_float(np.mean(cv_rmse)),
@@ -701,11 +714,13 @@ def run_pca_regression(df: pd.DataFrame, target: str, features: list) -> dict:
     try:
         kf = KFold(n_splits=min(5, len(subset)), shuffle=True, random_state=42)
         cv_rmse, cv_r2 = [], []
+        X_np = X_pca          # ← correct here: X_pca IS defined in this function
+        y_np = y.values       # ← fixed: define y_np so loop can use it consistently
         for tr, te in kf.split(X_np):
             m    = sm.OLS(y_np[tr], sm.add_constant(X_np[tr])).fit()
             pred = m.predict(sm.add_constant(X_np[te]))
             cv_rmse.append(np.sqrt(mean_squared_error(y_np[te], pred)))
-            cv_r2.append(r2_score(y.values[te], pred))
+            cv_r2.append(r2_score(y_np[te], pred))   # ← fixed: was y.values[te] (index mismatch)
         result['cross_validation'] = {
             'cv_rmse_mean': safe_float(np.mean(cv_rmse)),
             'cv_rmse_std':  safe_float(np.std(cv_rmse)),
