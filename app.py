@@ -216,6 +216,7 @@ if 'running'            not in st.session_state: st.session_state.running       
 if 'drag_matches'       not in st.session_state: st.session_state.drag_matches       = {}
 if 'mapping_editor_v'   not in st.session_state: st.session_state.mapping_editor_v   = 0
 if 'mapping_just_saved' not in st.session_state: st.session_state.mapping_just_saved = False
+if 'active_config'      not in st.session_state: st.session_state.active_config      = None
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -254,6 +255,20 @@ else:
 if selected_config is None:
     st.info("Enter a name for your new config above, then fill in the paths in the ⚙ Config tab and click Save.")
     st.stop()
+
+# ── When the user switches to a different config, wipe the cached widget
+# values so each text_input / selectbox / number_input re-reads from the
+# newly selected file instead of keeping the previous config's values.
+if st.session_state.active_config != selected_config:
+    _stale_keys = [
+        'path_raw_data', 'path_cleaned_data', 'path_combined_data',
+        'path_schemas', 'path_shop_mapping',
+        'gto_gto_monthly_sales', 'gto_gto_monthly_rent', 'gto_gto_tenant_turnover',
+        'cl_blank_num', 'cl_blank_str', 'cl_out_meth', 'cl_out_act', 'cl_threshold',
+    ]
+    for _k in _stale_keys:
+        st.session_state.pop(_k, None)
+    st.session_state.active_config = selected_config
 
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
@@ -364,18 +379,15 @@ with tab_config:
         else:
             subprocess.Popen(['xdg-open', str(walk)])
 
-    # Key suffix includes the config filename so each config has isolated session state.
-    # This means switching configs always loads fresh values from the file.
-    _cfg_slug = selected_config.replace('.', '_').replace(' ', '_')
     new_paths = {}
     for key, label in path_labels.items():
         col_input, col_btn = st.columns([5, 1])
         with col_input:
-            new_paths[key] = st.text_input(label, value=paths.get(key, ''), key=f"path_{key}_{_cfg_slug}")
+            new_paths[key] = st.text_input(label, value=paths.get(key, ''), key=f"path_{key}")
         with col_btn:
             st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
             is_file = key in ('schemas', 'shop_mapping')
-            if st.button("📄" if is_file else "📂", key=f"open_{key}_{_cfg_slug}", help=f"Open {label} in file explorer"):
+            if st.button("📄" if is_file else "📂", key=f"open_{key}", help=f"Open {label} in file explorer"):
                 if new_paths[key].strip():
                     open_in_explorer(new_paths[key], select_file=is_file)
                 else:
@@ -401,7 +413,7 @@ with tab_config:
             k = f"{row['category']}_{row['dataset']}"
             gto_vals[k] = st.number_input(
                 row['dataset'].replace('_', ' ').title(),
-                min_value=1, max_value=50, value=int(row['header_row']), key=f"gto_{k}_{_cfg_slug}")
+                min_value=1, max_value=50, value=int(row['header_row']), key=f"gto_{k}")
 
     st.markdown("---")
     st.markdown("#### 🧹 Data Cleaning")
@@ -426,19 +438,19 @@ with tab_config:
     cl1, cl2 = st.columns(2)
     with cl1:
         blank_numeric  = st.selectbox("Blank numeric cells", _BLANK_NUM_OPTS,
-                                      index=_idx(_BLANK_NUM_OPTS,  'blank_numeric',  'zero'),  key=f'cl_blank_num_{_cfg_slug}')
+                                      index=_idx(_BLANK_NUM_OPTS,  'blank_numeric',  'zero'),  key='cl_blank_num')
         blank_string   = st.selectbox("Blank text cells",    _BLANK_STR_OPTS,
-                                      index=_idx(_BLANK_STR_OPTS,  'blank_string',   'empty'), key=f'cl_blank_str_{_cfg_slug}')
+                                      index=_idx(_BLANK_STR_OPTS,  'blank_string',   'empty'), key='cl_blank_str')
     with cl2:
         outlier_method = st.selectbox("Outlier detection",   _OUTLIER_METH_OPTS,
-                                      index=_idx(_OUTLIER_METH_OPTS,'outlier_method', 'none'), key=f'cl_out_meth_{_cfg_slug}')
+                                      index=_idx(_OUTLIER_METH_OPTS,'outlier_method', 'none'), key='cl_out_meth')
         outlier_action = st.selectbox("Outlier action",      _OUTLIER_ACT_OPTS,
-                                      index=_idx(_OUTLIER_ACT_OPTS, 'outlier_action', 'cap'),  key=f'cl_out_act_{_cfg_slug}')
+                                      index=_idx(_OUTLIER_ACT_OPTS, 'outlier_action', 'cap'),  key='cl_out_act')
 
     _thresh_default   = float(_clean_cfg.get('outlier_threshold', '1.5') or '1.5')
     outlier_threshold = st.number_input(
         "Outlier threshold  (IQR multiplier · Z-score cutoff · Winsorise percentile)",
-        min_value=0.1, max_value=10.0, value=_thresh_default, step=0.1, key=f'cl_threshold_{_cfg_slug}')
+        min_value=0.1, max_value=10.0, value=_thresh_default, step=0.1, key='cl_threshold')
 
     _desc = {'zero':'Fill blank numbers with 0','mean':'Fill blank numbers with the column mean',
              'median':'Fill blank numbers with the column median','drop_row':'Drop any row that contains a blank',
@@ -839,89 +851,22 @@ with tab_ts:
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 6 — REGRESSION  (OLS · Stepwise · Ratio-OLS · Ridge · Lasso · PCA · Logit)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 with tab_reg:
-    paths = load_config(selected_config)
-    comb_folder = paths.get('combined_data', '')
-    res_json = Path(comb_folder) / 'linear_regression_results.json'
-    reg_xlsx = Path(comb_folder) / 'linear_regression_summary.xlsx'
+    paths_reg    = load_config(selected_config)
+    combined_reg = paths_reg.get('combined_data', '')
+    reg_json     = os.path.join(combined_reg, 'linear_regression_results.json') if combined_reg else ''
+    reg_xlsx     = os.path.join(combined_reg, 'linear_regression_summary.xlsx') if combined_reg else ''
 
-    if not res_json.exists():
-        st.warning("No regression results found. Please run the pipeline first.")
-    else:
-        with open(res_json, 'r') as f:
-            lr_data = json.load(f)
-        lr = lr_data.get('linear_regression', {})
+    if not reg_json or not Path(reg_json).exists():
+        st.info("No regression results yet — run the pipeline first to generate linear regression analysis.")
+        st.stop()
 
-        st.markdown("### 📊 Model Performance Summary")
-        summary_rows = lr.get('summary', [])
-        if summary_rows:
-            df_sum = pd.DataFrame(summary_rows)
-            st.dataframe(df_sum, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        
-        # --- SELECT INDIVIDUAL MODEL FOR DEEP DIVE ---
-        model_options = [k for k in lr.keys() if k != 'summary']
-        sel_mod = st.selectbox("Select Model to Interpret", model_options)
-        
-        model_data = lr[sel_mod]
-        # We check common keys used in your linear_regression.py output
-        fit = model_data.get('model_fit', {})
-        
-        # 1. METRIC TILES
-        m1, m2, m3, m4 = st.columns(4)
-        r2 = fit.get('r_squared', 0)
-        adj_r2 = fit.get('adj_r_squared', 0)
-        cv_r2 = fit.get('cv_r2', 0)
-        alpha = fit.get('best_alpha', "N/A")
-
-        m1.metric("R-Squared (Training)", f"{r2:.3f}")
-        m2.metric("Adj. R-Squared", f"{adj_r2:.3f}")
-        m3.metric("CV R-Squared (Testing)", f"{cv_r2:.3f}" if isinstance(cv_r2, float) else "N/A")
-        m4.metric("Best Alpha (Penalty)", alpha)
-
-        # 2. AUTOMATED BRAIN / INTERPRETATION
-        st.markdown("#### 🧠 AI Insights & Interpretation")
-        
-        # Overfitting Check
-        if isinstance(cv_r2, float) and (r2 - cv_r2 > 0.2):
-            st.error(f"🔴 **High Overfitting Risk:** There is a large gap ({r2-cv_r2:.2f}) between Training and CV R². The model is memorizing noise and will likely fail on new data.")
-        
-        # Complexity Check
-        if (r2 - adj_r2 > 0.2):
-            st.warning(f"⚠️ **Low Reliability:** Your Adjusted R² ({adj_r2:.3f}) is much lower than R². This means you have too many variables that don't actually help predict GTO.")
-
-        # Alpha Interpretation (Lasso/Ridge)
-        if isinstance(alpha, (int, float)) and alpha >= 1000:
-            st.info(f"ℹ️ **High Alpha ({alpha}):** The model is aggressively penalizing your variables. This suggests your data is very 'noisy' or the features are highly correlated (multicollinearity).")
-
-        # Final Verdict Logic
-        current_score = cv_r2 if isinstance(cv_r2, float) else r2
-        if current_score < 0.2:
-            st.error("❌ **Verdict: Poor.** This model explains less than 20% of the GTO. Do not use for financial planning.")
-        elif current_score < 0.5:
-            st.warning("⚠️ **Verdict: Weak/Moderate.** Useful for spotting broad trends, but individual predictions will have a high margin of error.")
-        else:
-            st.success("✅ **Verdict: Strong.** This model is statistically healthy and reliable for decision-making.")
-
-        # 3. FEATURE IMPACT (Coefficients)
-        st.markdown("#### 🚀 Feature Impact")
-        coefs = model_data.get('coef_table', [])
-        if coefs:
-            df_c = pd.DataFrame(coefs)
-            st.dataframe(df_c[['feature', 'coef', 'pvalue']], use_container_width=True)
-            
-            # Show top driver
-            significant = df_c[df_c['pvalue'] < 0.05].sort_values(by='coef', ascending=False)
-            if not significant.empty:
-                top_feat = significant.iloc[0]
-                st.write(f"🌟 **Key Driver:** **{top_feat['feature']}** has the strongest positive impact on GTO.")
-
-        # 4. DOWNLOADS
-        if reg_xlsx.exists():
-            with open(reg_xlsx, 'rb') as fh:
-                st.download_button("⬇️ Download Full Excel Report", data=fh.read(), file_name="regression_analysis.xlsx")
+    with open(reg_json) as f:
+        reg_data = json.load(f)
+    lr = reg_data.get('linear_regression', {})
+    if not lr:
+        st.info("No regression results found in file.")
+        st.stop()
 
     # ── Model type labels → internal keys ──────────────────────────────────
     MODEL_TYPES = {
