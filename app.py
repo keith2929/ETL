@@ -216,6 +216,7 @@ if 'running'            not in st.session_state: st.session_state.running       
 if 'drag_matches'       not in st.session_state: st.session_state.drag_matches       = {}
 if 'mapping_editor_v'   not in st.session_state: st.session_state.mapping_editor_v   = 0
 if 'mapping_just_saved' not in st.session_state: st.session_state.mapping_just_saved = False
+if 'active_config'      not in st.session_state: st.session_state.active_config      = None
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -254,6 +255,20 @@ else:
 if selected_config is None:
     st.info("Enter a name for your new config above, then fill in the paths in the ⚙ Config tab and click Save.")
     st.stop()
+
+# ── When the user switches to a different config, wipe the cached widget
+# values so each text_input / selectbox / number_input re-reads from the
+# newly selected file instead of keeping the previous config's values.
+if st.session_state.active_config != selected_config:
+    _stale_keys = [
+        'path_raw_data', 'path_cleaned_data', 'path_combined_data',
+        'path_schemas', 'path_shop_mapping',
+        'gto_gto_monthly_sales', 'gto_gto_monthly_rent', 'gto_gto_tenant_turnover',
+        'cl_blank_num', 'cl_blank_str', 'cl_out_meth', 'cl_out_act', 'cl_threshold',
+    ]
+    for _k in _stale_keys:
+        st.session_state.pop(_k, None)
+    st.session_state.active_config = selected_config
 
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
