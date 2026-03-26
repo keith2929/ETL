@@ -73,7 +73,8 @@ def load_config(config_file: str) -> dict:
 def run_pipeline(config_file: str, log_queue: queue.Queue):
     process = subprocess.Popen(
         [sys.executable, str(APP_DIR / 'main_FINAL.py'), config_file],
-        cwd=str(APP_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        cwd=str(APP_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace'
     )
     for line in process.stdout:
         log_queue.put(line)
