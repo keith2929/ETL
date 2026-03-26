@@ -12,7 +12,7 @@ Also computes:
 
 Usage:
   python3 regression.py <cleaned_data> <combined_data> [shop_mapping]
-  python3 regression.py       # uses config_Kim.xlsx
+  python3 regression.py       # uses config_Keith.xlsx
 """
 
 import warnings
@@ -323,7 +323,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3:
         main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else '')
     else:
-        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Kim.xlsx"
+        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
         script_dir  = Path(__file__).resolve().parent
         df          = pd.read_excel(script_dir / config_file, sheet_name='paths')
         cfg         = dict(zip(df['Setting'].astype(str).str.strip(), df['Value'].astype(str).str.strip()))

@@ -59,6 +59,6 @@ echo.
 echo Launching app — your browser will open automatically...
 echo (Close this window to stop the app)
 echo.
-%PYTHON_EXE% -m streamlit run app.py --server.headless false
+%PYTHON_EXE% -m streamlit run app_FINAL.py --server.headless false
 
 pause

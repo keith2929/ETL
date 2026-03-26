@@ -24,7 +24,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 # Config loader
 # ─────────────────────────────────────────────────────────────────────────────
-def load_config(config_file="config_Kim.xlsx") -> dict:
+def load_config(config_file="config_Keith.xlsx") -> dict:
     script_dir  = Path(__file__).resolve().parent
     config_path = script_dir / config_file
 
@@ -162,10 +162,10 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3:
         raw_data     = sys.argv[1]
         cleaned_data = sys.argv[2]
-        config_file  = sys.argv[5] if len(sys.argv) > 5 else "config_Kim.xlsx"
+        config_file  = sys.argv[5] if len(sys.argv) > 5 else "config_Keith.xlsx"
         cfg          = load_config(config_file)
     else:
-        config_file  = sys.argv[1] if len(sys.argv) == 2 else "config_Kim.xlsx"
+        config_file  = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
         cfg          = load_config(config_file)
         raw_data     = cfg.get('raw_data',     '')
         cleaned_data = cfg.get('cleaned_data', '')
