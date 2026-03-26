@@ -136,7 +136,7 @@ def _apply_filters(df: pd.DataFrame,
     if filt_source:
         df = df[df['campaign_source'].isin(filt_source)]
     if filt_outlet:
-        df = df[df['outlet_code'].astype(str).isin([str(x) for x in filt_outlet])]
+        df = df[df['outlet_name'].astype(str).isin([str(x) for x in filt_outlet])]
     if filt_months:
         df = df[df['month_year'].isin(filt_months)]
     return df
@@ -355,11 +355,11 @@ if _data_ready:
 
         with fc2:
             oc_opts = (
-                sorted(_filter_df['outlet_code'].dropna().astype(str).unique().tolist())
-                if 'outlet_code' in _filter_df.columns else []
+                sorted(_filter_df['outlet_name'].dropna().astype(str).unique().tolist())
+                if 'outlet_name' in _filter_df.columns else []
             )
             filt_outlet = tuple(
-                st.multiselect("Outlet Code", oc_opts,
+                st.multiselect("Outlet Name", oc_opts,
                                key="filt_outlet", placeholder="All outlets")
             )
 
