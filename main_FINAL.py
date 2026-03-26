@@ -26,7 +26,7 @@ try:
 except:
     CONFIG_DIR = SCRIPT_DIR
 
-DEFAULT_CONFIG = "config_Kim.xlsx"
+DEFAULT_CONFIG = "config_Keith.xlsx"
 
 
 def load_config_paths(config_file: str) -> dict:

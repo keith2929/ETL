@@ -3,9 +3,14 @@ import pandas as pd
 import subprocess, sys, os, threading, queue, time, json
 from pathlib import Path
 
+# Import the analysis functions from the dedicated scripts
+from regression_FINAL import analyse_time_series
+from linear_regression_FINAL import regression_1, regression_2
+
 st.set_page_config(page_title="Capstone Pipeline", page_icon="⚡",
                    layout="wide", initial_sidebar_state="collapsed")
 
+# ========== CSS (same as before) ==========
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap');
@@ -54,11 +59,13 @@ def run_pipeline(config_file, log_queue):
     process.wait()
     log_queue.put(f"__EXIT__{process.returncode}")
 
+# Session state for run tab
 for k, v in [('log_lines',[]),('last_exit',None),('running',False)]:
     if k not in st.session_state: st.session_state[k] = v
 
 st.markdown('<div class="app-header"><div class="app-title">⚡ PIPELINE</div><div class="app-sub">ETL · Regression · Time Series · Capstone 2025</div></div>', unsafe_allow_html=True)
 
+# Config selection
 configs = get_configs()
 if not configs:
     st.error("No config_*.xlsx file found.")
@@ -88,14 +95,11 @@ if not selected_config:
 
 st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
 
+# ========== RUN TAB (unchanged) ==========
 tab_run, tab_config, tab_ts, tab_reg = st.tabs([
     "▶  RUN", "⚙  CONFIG", "📈  TIME SERIES", "📉  REGRESSION"
 ])
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — RUN
-# ═══════════════════════════════════════════════════════════════════════════════
 with tab_run:
     run_clicked = st.button("▶  RUN PIPELINE", type="primary", use_container_width=True)
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
@@ -151,10 +155,7 @@ with tab_run:
             time.sleep(0.8)
             st.rerun()
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# ========== CONFIG TAB (unchanged) ==========
 with tab_config:
     paths = load_config(selected_config) if not is_new else {}
     if is_new:
@@ -188,286 +189,296 @@ with tab_config:
         st.success(f"✅ Saved {selected_config}")
         if is_new: st.rerun()
 
+# ========== Data loading and filters ==========
+paths = load_config(selected_config)
+cleaned_folder = paths.get('cleaned_data', '')
+if not cleaned_folder:
+    st.sidebar.warning("Cleaned data folder not set in config.")
+else:
+    @st.cache_data
+    def load_campaign_data():
+        camp_path = os.path.join(cleaned_folder, 'campaign_all.csv')
+        if not os.path.exists(camp_path):
+            return None
+        df = pd.read_csv(camp_path)
+        if 'amount' in df.columns:
+            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df['month_year'] = df['date'].dt.strftime('%b-%Y')
+        return df
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — TIME SERIES
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab_ts:
-    paths_ts    = load_config(selected_config)
-    combined_ts = paths_ts.get('combined_data','')
-    json_ts     = os.path.join(combined_ts, 'insights.json') if combined_ts else ''
-
-    if not json_ts or not Path(json_ts).exists():
-        st.info("No time series results yet — run the pipeline first.")
+    df_full = load_campaign_data()
+    if df_full is None:
+        st.sidebar.info("No campaign_all.csv found. Run pipeline first.")
     else:
-        with open(json_ts) as f:
-            ins = json.load(f)
+        # Sidebar filters
+        with st.sidebar:
+            st.markdown("### Global Filters")
+            source_options = sorted(df_full['campaign_source'].dropna().unique()) if 'campaign_source' in df_full else []
+            selected_sources = st.multiselect("Campaign Source", source_options, default=source_options)
+            outlet_options = sorted(df_full['outlet_name'].dropna().unique()) if 'outlet_name' in df_full else []
+            selected_outlets = st.multiselect("Outlet Name", outlet_options, default=outlet_options)
 
-        ts = ins.get('time_series', {})
-        if ts.get('error'):
-            st.warning(ts['error'])
-        else:
-            # ── Monthly Amount trend ──────────────────────────────────────
-            st.markdown("### 📈 Monthly Member Spend (Amount)")
+        # Apply filters
+        filtered = df_full.copy()
+        if selected_sources:
+            filtered = filtered[filtered['campaign_source'].isin(selected_sources)]
+        if selected_outlets:
+            filtered = filtered[filtered['outlet_name'].isin(selected_outlets)]
 
-            actual   = ts.get('actual', [])
-            forecast = ts.get('forecast', [])
-
-            if actual:
-                df_act  = pd.DataFrame(actual).rename(columns={'value':'Actual Amount'})
-                df_fore = pd.DataFrame(forecast).rename(columns={'forecast':'Forecast'}) if forecast else pd.DataFrame()
-                df_chart = df_act.set_index('month_year')[['Actual Amount']]
-                if not df_fore.empty:
-                    df_chart = df_chart.join(df_fore.set_index('month_year')[['Forecast']], how='outer')
-                st.line_chart(df_chart)
-
-            trend = ts.get('trend', {})
-            if trend:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Trend Direction", trend.get('direction','—').title())
-                c2.metric("Trend Strength",  trend.get('strength','—').title())
-                c3.metric("R²",              f"{trend.get('r_squared') or 0:.3f}")
-                st.caption("✅ Significant (p<0.05)" if trend.get('significant')
-                           else "⚠️ Not significant (p≥0.05)")
-
-            st.markdown("---")
-
-            # ── Month dummies regression ──────────────────────────────────
-            st.markdown("### 📅 Seasonality — Month Dummies Regression")
-            st.caption("Which months have significantly higher/lower spend? Base = January")
-
-            mdr = ts.get('month_dummies_regression', {})
-            if mdr.get('error'):
-                st.warning(mdr['error'])
-            elif mdr.get('coef_table'):
-                if mdr.get('insight'):
-                    st.markdown(f'<div class="insight-box">💡 {mdr["insight"]}</div>', unsafe_allow_html=True)
-
-                c1,c2,c3,c4 = st.columns(4)
-                c1.metric("R²",       f"{mdr.get('r_squared') or 0:.3f}")
-                c2.metric("Adj R²",   f"{mdr.get('adj_r_squared') or 0:.3f}")
-                c3.metric("F p-value",f"{mdr.get('f_pvalue') or 0:.4f}")
-                c4.metric("N obs",    mdr.get('n_obs','—'))
-
-                df_coef      = pd.DataFrame(mdr['coef_table'])
-                df_coef_plot = df_coef[df_coef['month'] != 'const'].copy()
-
-                col_chart, col_table = st.columns([2,3])
-                with col_chart:
-                    if not df_coef_plot.empty:
-                        st.markdown("**Coefficient by Month**")
-                        st.bar_chart(df_coef_plot.set_index('month')['coef'])
-                with col_table:
-                    def hl_month(row):
-                        return ['background-color:#3d3800; color:#fbbf24']*len(row) if row.get('significant') else ['']*len(row)
-                    st.dataframe(
-                        df_coef[['month','coef','p_value','significant']].style.apply(hl_month, axis=1),
-                        use_container_width=True, hide_index=True
-                    )
-                st.caption("✅ Green = significant at p<0.05. Positive = higher spend than January.")
-
-            st.markdown("---")
-
-            # ── MoM trends ────────────────────────────────────────────────
-            st.markdown("### 📊 Month-on-Month Trends")
-            mom = ts.get('mom_trends', [])
-            if mom:
-                st.dataframe(pd.DataFrame(mom), use_container_width=True, hide_index=True)
-
-            st.markdown("---")
-
-            # ── Amount by source ──────────────────────────────────────────
-            by_source = ts.get('amount_by_source', [])
-            if by_source:
-                st.markdown("### 🏷️ Spend by Campaign Source (Mall vs Brand)")
-                df_src = pd.DataFrame(by_source)
-                if 'campaign_source' in df_src.columns and 'month_year' in df_src.columns:
-                    try:
-                        pivoted = df_src.pivot(index='month_year', columns='campaign_source',
-                                               values='amount').fillna(0)
-                        st.bar_chart(pivoted)
-                    except:
-                        st.dataframe(df_src, use_container_width=True, hide_index=True)
-
-            st.markdown("---")
-
-            # ── Anomalies ─────────────────────────────────────────────────
-            anomalies = ts.get('anomalies', [])
-            if anomalies:
-                st.markdown("### ⚠️ Anomalous Months")
-                st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+        # ========== TIME SERIES TAB ==========
+        with tab_ts:
+            if filtered.empty:
+                st.warning("No data after filters. Adjust filters.")
             else:
-                st.caption("No anomalous months detected.")
+                # Run time series analysis on filtered data
+                ts_result = analyse_time_series(filtered)
 
-            st.markdown("---")
-            report = os.path.join(combined_ts, 'insights_report.xlsx')
-            if Path(report).exists():
-                with open(report,'rb') as fh:
-                    st.download_button("⬇️  Download Time Series Report (.xlsx)",
-                                       data=fh.read(), file_name='insights_report.xlsx',
-                                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                       type='primary')
+                if 'error' in ts_result:
+                    st.error(ts_result['error'])
+                else:
+                    # Display results (same layout as before)
+                    st.markdown("### 📈 Monthly Member Spend (Amount)")
+                    actual = ts_result.get('actual', [])
+                    forecast = ts_result.get('forecast', [])
+                    if actual:
+                        df_act = pd.DataFrame(actual).rename(columns={'value': 'Actual Amount'})
+                        df_fore = pd.DataFrame(forecast).rename(columns={'forecast': 'Forecast'}) if forecast else pd.DataFrame()
+                        df_chart = df_act.set_index('month_year')[['Actual Amount']]
+                        if not df_fore.empty:
+                            df_chart = df_chart.join(df_fore.set_index('month_year')[['Forecast']], how='outer')
+                        st.line_chart(df_chart)
 
+                    trend = ts_result.get('trend', {})
+                    if trend:
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Trend Direction", trend.get('direction','—').title())
+                        c2.metric("Trend Strength",  trend.get('strength','—').title())
+                        c3.metric("R²",              f"{trend.get('r_squared') or 0:.3f}")
+                        st.caption("✅ Significant (p<0.05)" if trend.get('significant')
+                                   else "⚠️ Not significant (p≥0.05)")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — REGRESSION
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab_reg:
-    paths_reg    = load_config(selected_config)
-    combined_reg = paths_reg.get('combined_data','')
-    reg_json     = os.path.join(combined_reg, 'linear_regression_results.json') if combined_reg else ''
-    reg_xlsx     = os.path.join(combined_reg, 'linear_regression_summary.xlsx') if combined_reg else ''
+                    st.markdown("---")
+                    st.markdown("### 📅 Seasonality — Month Dummies Regression")
+                    st.caption("Which months have significantly higher/lower spend? Base = January")
 
-    if not reg_json or not Path(reg_json).exists():
-        st.info("No regression results yet — run the pipeline first.")
-        st.stop()
+                    mdr = ts_result.get('month_dummies_regression', {})
+                    if mdr.get('error'):
+                        st.warning(mdr['error'])
+                    elif mdr.get('coef_table'):
+                        if mdr.get('insight'):
+                            st.markdown(f'<div class="insight-box">💡 {mdr["insight"]}</div>', unsafe_allow_html=True)
 
-    with open(reg_json) as f:
-        reg_data = json.load(f)
+                        c1,c2,c3,c4 = st.columns(4)
+                        c1.metric("R²",       f"{mdr.get('r_squared') or 0:.3f}")
+                        c2.metric("Adj R²",   f"{mdr.get('adj_r_squared') or 0:.3f}")
+                        c3.metric("F p-value",f"{mdr.get('f_pvalue') or 0:.4f}")
+                        c4.metric("N obs",    mdr.get('n_obs','—'))
 
-    lr = reg_data.get('linear_regression', {})
+                        df_coef = pd.DataFrame(mdr['coef_table'])
+                        df_coef_plot = df_coef[df_coef['month'] != 'const'].copy()
 
-    # ── Summary ───────────────────────────────────────────────────────────
-    st.markdown("### 📊 Model Comparison Summary")
-    summary = lr.get('summary', [])
-    if summary:
-        df_sum = pd.DataFrame(summary)
-        disp   = [c for c in ['model_key','label','n_obs','r_squared',
-                               'adj_r_squared','f_pvalue','cv_r2','cv_rmse'] if c in df_sum.columns]
-        st.dataframe(
-            df_sum[disp], use_container_width=True, hide_index=True,
-            column_config={
-                'r_squared':     st.column_config.ProgressColumn('R²',     min_value=0, max_value=1, format='%.3f'),
-                'adj_r_squared': st.column_config.ProgressColumn('Adj R²', min_value=0, max_value=1, format='%.3f'),
-                'cv_r2':         st.column_config.ProgressColumn('CV R²',  min_value=0, max_value=1, format='%.3f'),
-            }
-        )
-        valid = df_sum.dropna(subset=['adj_r_squared'])
-        if not valid.empty:
-            best = valid.loc[valid['adj_r_squared'].idxmax()]
-            st.markdown(
-                f'<div class="insight-box">🏆 Best model: <strong>{best["model_key"]}</strong> — '
-                f'Adj-R² = <strong>{best["adj_r_squared"]:.3f}</strong></div>',
-                unsafe_allow_html=True
-            )
+                        col_chart, col_table = st.columns([2,3])
+                        with col_chart:
+                            if not df_coef_plot.empty:
+                                st.markdown("**Coefficient by Month**")
+                                st.bar_chart(df_coef_plot.set_index('month')['coef'])
+                        with col_table:
+                            def hl_month(row):
+                                return ['background-color:#3d3800; color:#fbbf24']*len(row) if row.get('significant') else ['']*len(row)
+                            st.dataframe(
+                                df_coef[['month','coef','p_value','significant']].style.apply(hl_month, axis=1),
+                                use_container_width=True, hide_index=True
+                            )
+                        st.caption("✅ Green = significant at p<0.05. Positive = higher spend than January.")
 
-    st.markdown("---")
+                    st.markdown("---")
+                    st.markdown("### 📊 Month-on-Month Trends")
+                    mom = ts_result.get('mom_trends', [])
+                    if mom:
+                        st.dataframe(pd.DataFrame(mom), use_container_width=True, hide_index=True)
 
-    # ── Model selector ────────────────────────────────────────────────────
-    model_options = {
-        'Regression 1 — Y = Amount (outlet×month)': 'regression_1_amount',
-        'Regression 2 — Y = Amount (per receipt)':  'regression_2_amount',
-    }
-    selected_label = st.radio("Select model", list(model_options.keys()), horizontal=True)
-    model = lr.get(model_options[selected_label], {})
+                    st.markdown("---")
+                    by_source = ts_result.get('amount_by_source', [])
+                    if by_source:
+                        st.markdown("### 🏷️ Spend by Campaign Source (Mall vs Brand)")
+                        df_src = pd.DataFrame(by_source)
+                        if 'campaign_source' in df_src.columns and 'month_year' in df_src.columns:
+                            try:
+                                pivoted = df_src.pivot(index='month_year', columns='campaign_source',
+                                                       values='amount').fillna(0)
+                                st.bar_chart(pivoted)
+                            except:
+                                st.dataframe(df_src, use_container_width=True, hide_index=True)
 
-    if model.get('error'):
-        st.error(f"Model error: {model['error']}")
-        st.stop()
+                    st.markdown("---")
+                    anomalies = ts_result.get('anomalies', [])
+                    if anomalies:
+                        st.markdown("### ⚠️ Anomalous Months")
+                        st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No anomalous months detected.")
 
-    if model.get('insight'):
-        st.markdown(f'<div class="insight-box">💡 {model["insight"]}</div>', unsafe_allow_html=True)
+                    st.markdown("---")
+                    # Download filtered time series data
+                    monthly_data = ts_result.get('monthly_data', [])
+                    if monthly_data:
+                        df_download = pd.DataFrame(monthly_data)
+                        csv = df_download.to_csv(index=False).encode('utf-8')
+                        st.download_button("⬇️  Download Filtered Time Series Data (CSV)",
+                                           data=csv, file_name='filtered_time_series.csv',
+                                           mime='text/csv', type='primary')
 
-    # ── Model fit ─────────────────────────────────────────────────────────
-    st.markdown("#### Model Fit")
-    fit = model.get('model_fit', {})
-    cv  = model.get('cross_validation', {})
+        # ========== REGRESSION TAB ==========
+        with tab_reg:
+            if filtered.empty:
+                st.warning("No data after filters. Adjust filters.")
+            else:
+                # Regression 1
+                st.markdown("### Regression 1: Outlet × Month Level")
+                reg1 = regression_1(filtered)
+                if 'error' in reg1:
+                    st.error(f"Regression 1 error: {reg1['error']}")
+                else:
+                    if reg1.get('insight'):
+                        st.markdown(f'<div class="insight-box">💡 {reg1["insight"]}</div>', unsafe_allow_html=True)
+                    fit = reg1.get('model_fit', {})
+                    cv  = reg1.get('cross_validation', {})
+                    c1,c2,c3,c4,c5,c6 = st.columns(6)
+                    c1.metric("R²",       f"{fit.get('r_squared') or 0:.3f}")
+                    c2.metric("Adj R²",   f"{fit.get('adj_r_squared') or 0:.3f}")
+                    c3.metric("F p-value",f"{fit.get('f_pvalue') or 0:.4f}")
+                    c4.metric("N obs",    fit.get('n_obs','—'))
+                    c5.metric("CV RMSE",  f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
+                    c6.metric("CV R²",    f"{cv.get('cv_r2_mean') or 0:.3f}"    if cv.get('cv_r2_mean')   else "—")
+                    dw = fit.get('dw_stat')
+                    if dw:
+                        st.caption(f"Durbin-Watson: {dw:.3f} — " +
+                                   ("✅ No autocorrelation" if 1.5 < dw < 2.5 else "⚠️ Possible autocorrelation"))
 
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.metric("R²",       f"{fit.get('r_squared') or 0:.3f}")
-    c2.metric("Adj R²",   f"{fit.get('adj_r_squared') or 0:.3f}")
-    c3.metric("F p-value",f"{fit.get('f_pvalue') or 0:.4f}")
-    c4.metric("N obs",    fit.get('n_obs','—'))
-    c5.metric("CV RMSE",  f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
-    c6.metric("CV R²",    f"{cv.get('cv_r2_mean') or 0:.3f}"    if cv.get('cv_r2_mean')   else "—")
+                    st.markdown("#### Coefficients (standardised β)")
+                    coef_table = reg1.get('coef_table', [])
+                    if coef_table:
+                        df_coef = pd.DataFrame(coef_table)
+                        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy()
+                        show_sig = st.checkbox("Show significant predictors only (p<0.05)", value=False, key="reg1_sig")
+                        if show_sig:
+                            df_coef_plot = df_coef_plot[df_coef_plot['significant'] == True]
+                        col_chart, col_table = st.columns([2,3])
+                        with col_chart:
+                            if not df_coef_plot.empty:
+                                top20 = df_coef_plot.nlargest(20, 'coef', keep='all')
+                                st.markdown("**Top coefficients**")
+                                st.bar_chart(top20.set_index('feature')['coef'])
+                        with col_table:
+                            disp_cols = [c for c in ['feature','coef','std_err','t_stat',
+                                                     'p_value','ci_lower','ci_upper','significant']
+                                         if c in df_coef.columns]
+                            def hl(row):
+                                return ['background-color:#3d3800; color:#fbbf24']*len(row) if row.get('significant') else ['']*len(row)
+                            st.dataframe(
+                                df_coef[disp_cols].style.apply(hl, axis=1),
+                                use_container_width=True, hide_index=True
+                            )
+                        st.caption("✅ Green = significant at p<0.05. Standardised β — comparable in magnitude.")
 
-    dw = fit.get('dw_stat')
-    if dw:
-        st.caption(f"Durbin-Watson: {dw:.3f} — "
-                   + ("✅ No autocorrelation" if 1.5 < dw < 2.5 else "⚠️ Possible autocorrelation"))
+                    vif = reg1.get('vif', [])
+                    if vif:
+                        st.markdown("#### Multicollinearity (VIF)")
+                        df_vif = pd.DataFrame(vif)
+                        c1, c2 = st.columns([1,2])
+                        with c1:
+                            st.dataframe(df_vif, use_container_width=True, hide_index=True)
+                        with c2:
+                            st.caption("VIF < 5 → ✅ OK  |  5–10 → ⚠️ Moderate  |  >10 → ❌ High")
+                            if not df_vif.empty and 'vif' in df_vif.columns:
+                                mv = df_vif['vif'].dropna().max()
+                                if mv and mv > 10:  st.warning(f"⚠️ Max VIF={mv:.1f} — high multicollinearity")
+                                elif mv and mv > 5: st.warning(f"⚠️ Max VIF={mv:.1f} — moderate multicollinearity")
+                                else:               st.success("✅ All VIF < 5")
 
-    st.markdown("---")
+                    residuals = reg1.get('residuals', [])
+                    if residuals:
+                        st.markdown("#### Residual Diagnostics")
+                        df_resid = pd.DataFrame(residuals)
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**Fitted vs Residuals**")
+                            st.scatter_chart(df_resid, x='fitted', y='residual', height=280)
+                        with c2:
+                            st.markdown("**Standardised Residuals Distribution**")
+                            st.bar_chart(df_resid['std_resid'].value_counts(bins=15).sort_index(), height=280)
 
-    # ── Feature groups ────────────────────────────────────────────────────
-    fg = model.get('feature_groups', {})
-    if fg:
-        cols = st.columns(len(fg))
-        for col, (group, feats) in zip(cols, fg.items()):
-            with col:
-                st.markdown(f"**{group.title()} ({len(feats)})**")
-                st.caption(", ".join(feats[:10]) + ("..." if len(feats) > 10 else ""))
+                st.markdown("---")
+                st.markdown("### Regression 2: Individual Transaction Level")
+                reg2 = regression_2(filtered)
+                if 'error' in reg2:
+                    st.error(f"Regression 2 error: {reg2['error']}")
+                else:
+                    if reg2.get('insight'):
+                        st.markdown(f'<div class="insight-box">💡 {reg2["insight"]}</div>', unsafe_allow_html=True)
+                    fit = reg2.get('model_fit', {})
+                    cv  = reg2.get('cross_validation', {})
+                    c1,c2,c3,c4,c5,c6 = st.columns(6)
+                    c1.metric("R²",       f"{fit.get('r_squared') or 0:.3f}")
+                    c2.metric("Adj R²",   f"{fit.get('adj_r_squared') or 0:.3f}")
+                    c3.metric("F p-value",f"{fit.get('f_pvalue') or 0:.4f}")
+                    c4.metric("N obs",    fit.get('n_obs','—'))
+                    c5.metric("CV RMSE",  f"{cv.get('cv_rmse_mean') or 0:,.1f}" if cv.get('cv_rmse_mean') else "—")
+                    c6.metric("CV R²",    f"{cv.get('cv_r2_mean') or 0:.3f}"    if cv.get('cv_r2_mean')   else "—")
 
-    st.markdown("---")
+                    coef_table = reg2.get('coef_table', [])
+                    if coef_table:
+                        df_coef = pd.DataFrame(coef_table)
+                        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy()
+                        show_sig = st.checkbox("Show significant predictors only (p<0.05)", value=False, key="reg2_sig")
+                        if show_sig:
+                            df_coef_plot = df_coef_plot[df_coef_plot['significant'] == True]
+                        col_chart, col_table = st.columns([2,3])
+                        with col_chart:
+                            if not df_coef_plot.empty:
+                                top20 = df_coef_plot.nlargest(20, 'coef', keep='all')
+                                st.markdown("**Top coefficients**")
+                                st.bar_chart(top20.set_index('feature')['coef'])
+                        with col_table:
+                            disp_cols = [c for c in ['feature','coef','std_err','t_stat',
+                                                     'p_value','ci_lower','ci_upper','significant']
+                                         if c in df_coef.columns]
+                            def hl(row):
+                                return ['background-color:#3d3800; color:#fbbf24']*len(row) if row.get('significant') else ['']*len(row)
+                            st.dataframe(
+                                df_coef[disp_cols].style.apply(hl, axis=1),
+                                use_container_width=True, hide_index=True
+                            )
+                        st.caption("✅ Green = significant at p<0.05. Standardised β — comparable in magnitude.")
 
-    # ── Coefficients ──────────────────────────────────────────────────────
-    st.markdown("#### Coefficients (standardised β)")
-    coef_table = model.get('coef_table', [])
-    if coef_table:
-        df_coef      = pd.DataFrame(coef_table)
-        df_coef_plot = df_coef[df_coef['feature'] != 'const'].copy()
+                    # Optionally show VIF for regression 2 (if available)
+                    vif = reg2.get('vif', [])
+                    if vif:
+                        st.markdown("#### Multicollinearity (VIF)")
+                        df_vif = pd.DataFrame(vif)
+                        st.dataframe(df_vif, use_container_width=True, hide_index=True)
 
-        show_sig = st.checkbox("Show significant predictors only (p<0.05)", value=False)
-        if show_sig:
-            df_coef_plot = df_coef_plot[df_coef_plot['significant'] == True]
+                    residuals = reg2.get('residuals', [])
+                    if residuals:
+                        st.markdown("#### Residual Diagnostics")
+                        df_resid = pd.DataFrame(residuals)
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**Fitted vs Residuals**")
+                            st.scatter_chart(df_resid, x='fitted', y='residual', height=280)
+                        with c2:
+                            st.markdown("**Standardised Residuals Distribution**")
+                            st.bar_chart(df_resid['std_resid'].value_counts(bins=15).sort_index(), height=280)
 
-        col_chart, col_table = st.columns([2,3])
-        with col_chart:
-            if not df_coef_plot.empty:
-                top20 = df_coef_plot.nlargest(20, 'coef', keep='all')
-                st.markdown("**Top coefficients**")
-                st.bar_chart(top20.set_index('feature')['coef'])
-        with col_table:
-            disp_cols = [c for c in ['feature','coef','std_err','t_stat',
-                                      'p_value','ci_lower','ci_upper','significant']
-                         if c in df_coef.columns]
-            def hl(row):
-                return ['background-color:#3d3800; color:#fbbf24']*len(row) if row.get('significant') else ['']*len(row)
-            st.dataframe(
-                df_coef[disp_cols].style.apply(hl, axis=1),
-                use_container_width=True, hide_index=True
-            )
-        st.caption("✅ Green = significant at p<0.05. Standardised β — comparable in magnitude.")
-
-    st.markdown("---")
-
-    # ── VIF ───────────────────────────────────────────────────────────────
-    vif = model.get('vif', [])
-    if vif:
-        st.markdown("#### Multicollinearity (VIF)")
-        df_vif = pd.DataFrame(vif)
-        c1, c2 = st.columns([1,2])
-        with c1: st.dataframe(df_vif, use_container_width=True, hide_index=True)
-        with c2:
-            st.caption("VIF < 5 → ✅ OK  |  5–10 → ⚠️ Moderate  |  >10 → ❌ High")
-            if not df_vif.empty and 'vif' in df_vif.columns:
-                mv = df_vif['vif'].dropna().max()
-                if mv and mv > 10:  st.warning(f"⚠️ Max VIF={mv:.1f} — high multicollinearity")
-                elif mv and mv > 5: st.warning(f"⚠️ Max VIF={mv:.1f} — moderate multicollinearity")
-                else:               st.success("✅ All VIF < 5")
-
-    st.markdown("---")
-
-    # ── Residuals ─────────────────────────────────────────────────────────
-    residuals = model.get('residuals', [])
-    if residuals:
-        st.markdown("#### Residual Diagnostics")
-        df_resid = pd.DataFrame(residuals)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Fitted vs Residuals**")
-            st.scatter_chart(df_resid, x='fitted', y='residual', height=280)
-            st.caption("Ideal: randomly scattered around 0")
-        with c2:
-            st.markdown("**Standardised Residuals Distribution**")
-            st.bar_chart(df_resid['std_resid'].value_counts(bins=15).sort_index(), height=280)
-            st.caption("Ideal: roughly bell-shaped around 0")
-
-    st.markdown("---")
-
-    # ── Download ──────────────────────────────────────────────────────────
-    if reg_xlsx and Path(reg_xlsx).exists():
-        with open(reg_xlsx,'rb') as fh:
-            st.download_button("⬇️  Download Regression Summary (.xlsx)",
-                               data=fh.read(), file_name='linear_regression_summary.xlsx',
-                               mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                               type='primary')
+                # Download buttons for regression summaries (if they exist)
+                st.markdown("---")
+                combined_folder = paths.get('combined_data', '')
+                reg_xlsx = os.path.join(combined_folder, 'linear_regression_summary.xlsx') if combined_folder else ''
+                if reg_xlsx and Path(reg_xlsx).exists():
+                    with open(reg_xlsx,'rb') as fh:
+                        st.download_button("⬇️  Download Full Regression Summary (.xlsx)",
+                                           data=fh.read(), file_name='linear_regression_summary.xlsx',
+                                           mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                           type='primary')
