@@ -835,7 +835,43 @@ with tab_reg:
                         use_container_width=True, hide_index=True,
                     )
                 st.caption("✅ Highlighted = significant at p<0.05. Standardised β — comparable in magnitude.")
+            # ── Campaign Summary Table ─────────────────────────────────────────────
+            camp_summary = model.get('campaign_summary', [])
+            if camp_summary and model_options[selected_label] == 'regression_1_amount':
+                st.markdown("---")
+                st.markdown("#### 🏆 Campaign Revenue Summary")
+                st.caption("Total revenue, average spend per receipt, and redemption count per campaign. Sorted by total revenue.")
 
+                df_camp = pd.DataFrame(camp_summary)
+
+                # is_brand
+                if 'is_brand' in df_camp.columns:
+                    df_camp['source'] = df_camp['is_brand'].map({0: 'Mall', 1: 'Brand'})
+                    df_camp = df_camp.drop(columns=['is_brand'])
+
+                # column order
+                col_order = [c for c in ['voucher_code', 'source', 'total_amount',
+                                        'avg_amount', 'n_receipts'] if c in df_camp.columns]
+                df_camp = df_camp[col_order]
+
+                # number format
+                st.dataframe(
+                    df_camp,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        'voucher_code':  st.column_config.TextColumn('Campaign'),
+                        'source':        st.column_config.TextColumn('Source'),
+                        'total_amount':  st.column_config.NumberColumn('Total Revenue ($)', format='$%.0f'),
+                        'avg_amount':    st.column_config.NumberColumn('Avg per Receipt ($)', format='$%.0f'),
+                        'n_receipts':    st.column_config.NumberColumn('Redemptions', format='%d'),
+                    }
+                )
+
+                # Top 10 bar chart
+                st.markdown("**Top 10 Campaigns by Total Revenue**")
+                top10 = df_camp.head(10).set_index('voucher_code')[['total_amount']]
+                st.bar_chart(top10)
             st.markdown("---")
 
             # ── VIF ───────────────────────────────────────────────────────────
