@@ -5,14 +5,8 @@ Regression 1 — What drives transaction Amount at outlet level?
   Unit : outlet × month
   Y    = amount (total spend per outlet per month)
   X1   = is_brand (Mall=0, Brand=1)
-  X2   = month dummies (Jan as base, drop_first=True)
-  X3   = voucher_code dummies (top 30 by frequency)
-
-Regression 2 — What drives individual transaction Amount?
-  Unit : individual receipt row
-  Y    = amount (spend per transaction)
-  X1   = is_brand (campaign source)
   X2   = voucher_code dummies (top 30 by frequency)
+
 
 No GTO data used.
 
@@ -154,91 +148,13 @@ def run_ols(df: pd.DataFrame, target: str, features: list, label: str = '') -> d
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Regression 1
-# Y = amount (total per outlet × month)
-# X1 = is_brand | X2 = month dummies | X3 = voucher_code dummies
+#Y = amount (per receipt)
+#X = voucher_code dummies 
+ #   is_brand
+#n = total receipt no
 # ─────────────────────────────────────────────────────────────────────────────
 def regression_1(campaign: pd.DataFrame) -> dict:
-    print("\n  ── Regression 1: Y = Amount (outlet × month) ──")
-
-    outlet_col  = next((c for c in ['outlet_name'] if c in campaign.columns), None)
-    voucher_col = next((c for c in ['voucher_code'] if c in campaign.columns), None)
-
-    if not outlet_col:
-        return {'error': 'outlet_name column not found'}
-    if 'amount' not in campaign.columns:
-        return {'error': 'amount column not found'}
-    if 'month_year' not in campaign.columns:
-        return {'error': 'month_year column not found'}
-
-    df = campaign.copy()
-    df['amount']     = pd.to_numeric(df['amount'], errors='coerce')
-    df[outlet_col]   = df[outlet_col].astype(str).str.strip().str.lower()
-
-    # X1: is_brand
-    df['is_brand'] = (df['campaign_source'].astype(str).str.lower() == 'brand').astype(int)
-
-    # ── Aggregate to outlet × month ───────────────────────────────────────
-    agg = (df.groupby([outlet_col, 'month_year'])
-             .agg(
-                 amount   =('amount',   'sum'),
-                 is_brand =('is_brand', 'max'),
-             )
-             .reset_index()
-             .rename(columns={outlet_col: 'outlet'}))
-
-    # X3: voucher_code dummies per outlet × month
-    if voucher_col:
-        df[voucher_col] = df[voucher_col].astype(str).str.strip()
-        top_codes = df[voucher_col].value_counts().head(MAX_DUMMIES).index.tolist()
-        df_top    = df[df[voucher_col].isin(top_codes)].copy()
-        df_top['_active'] = 1
-        pivot = (df_top
-                 .groupby([outlet_col, 'month_year', voucher_col])['_active']
-                 .max().unstack(fill_value=0)
-                 .reset_index()
-                 .rename(columns={outlet_col: 'outlet'}))
-        pivot.columns = ['outlet', 'month_year'] + \
-                        [f"camp_{c}" for c in pivot.columns[2:]]
-        agg = pd.merge(agg, pivot, on=['outlet', 'month_year'], how='left').fillna(0)
-
-    print(f"    Dataset: {len(agg)} outlet×month rows, "
-          f"{agg['outlet'].nunique()} unique outlets")
-
-    if len(agg) < MIN_ROWS:
-        return {'error': f"Only {len(agg)} outlet×month rows — need ≥{MIN_ROWS}"}
-
-    # X2: month dummies (Jan as base)
-    agg['_month_num'] = pd.to_datetime(agg['month_year'], format='%b-%Y', errors='coerce').dt.month
-    month_dummies     = pd.get_dummies(agg['_month_num'], prefix='month', drop_first=True)
-    agg = pd.concat([agg.reset_index(drop=True), month_dummies.reset_index(drop=True)], axis=1)
-
-    camp_cols  = [c for c in agg.columns if c.startswith('camp_')]
-    month_cols = [c for c in agg.columns if c.startswith('month_')]
-    features   = ['is_brand'] + month_cols + camp_cols
-
-    print(f"    Features: 1 control + {len(month_cols)} month + "
-          f"{len(camp_cols)} campaign = {len(features)} total")
-
-    features = [f for f in features if f in agg.columns]
-    features = [f for f in features if pd.api.types.is_numeric_dtype(agg[f])]
-    result = run_ols(agg, 'amount', features, label='Regression 1: Y=Amount (outlet×month)')
-    result['n_rows']    = len(agg)
-    result['n_outlets'] = agg['outlet'].nunique()
-    result['feature_groups'] = {
-        'control':  ['is_brand'],
-        'month':    month_cols,
-        'campaign': camp_cols,
-    }
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Regression 2
-# Y = amount (per individual receipt)
-# X1 = is_brand | X2 = voucher_code dummies
-# ─────────────────────────────────────────────────────────────────────────────
-def regression_2(campaign: pd.DataFrame) -> dict:
-    print("\n  ── Regression 2: Y = Amount (per receipt) ──")
+    print("\n  ── Regression 1: Y = Amount (per receipt, by campaign) ──")
 
     if 'amount' not in campaign.columns:
         return {'error': 'amount column not found'}
@@ -246,48 +162,69 @@ def regression_2(campaign: pd.DataFrame) -> dict:
         return {'error': 'voucher_code column not found'}
 
     df = campaign.copy()
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+    df['amount']       = pd.to_numeric(df['amount'], errors='coerce')
+    df['voucher_code'] = df['voucher_code'].astype(str).str.strip()
     df = df.dropna(subset=['amount']).reset_index(drop=True)
 
     if len(df) < MIN_ROWS:
-        return {'error': f"Too few rows with amount ({len(df)})"}
+        return {'error': f"Too few rows ({len(df)})"}
 
     print(f"    Dataset: {len(df):,} receipt rows")
 
     # X1: is_brand
     df['is_brand'] = (df['campaign_source'].astype(str).str.lower() == 'brand').astype(int)
 
-    # X2: voucher_code dummies (top N)
-    df['voucher_code'] = df['voucher_code'].astype(str).str.strip()
+    # X2: voucher_code dummies
+    # base = (drop_first=True)
     top_codes = df['voucher_code'].value_counts().head(MAX_DUMMIES).index.tolist()
     vdummies  = pd.get_dummies(
         df['voucher_code'].where(df['voucher_code'].isin(top_codes), other='other'),
-        prefix='vcode', drop_first=True
+        prefix='camp', drop_first=True
     )
 
-    df = pd.concat([df[['amount', 'is_brand']].reset_index(drop=True),
-                    vdummies.reset_index(drop=True)], axis=1)
+    df_reg = pd.concat([df[['amount', 'is_brand']].reset_index(drop=True),
+                        vdummies.reset_index(drop=True)], axis=1)
 
-    vcode_cols = [c for c in df.columns if c.startswith('vcode_')]
-    features   = ['is_brand'] + vcode_cols
+    camp_cols = [c for c in df_reg.columns if c.startswith('camp_')]
+    features  = ['is_brand'] + camp_cols
+    features  = [f for f in features if pd.api.types.is_numeric_dtype(df_reg[f])]
 
-    print(f"    Features: 1 control + {len(vcode_cols)} voucher dummies = {len(features)} total")
+    print(f"    Features: 1 control + {len(camp_cols)} campaign dummies = {len(features)} total")
 
-    result = run_ols(df, 'amount', features, label='Regression 2: Y=Amount (per receipt)')
-    result['n_rows'] = len(df)
+    result = run_ols(df_reg, 'amount', features,
+                     label='Regression 1: Y=Amount (per receipt, by campaign)')
+    result['n_rows'] = len(df_reg)
     result['feature_groups'] = {
-        'control': ['is_brand'],
-        'voucher': vcode_cols,
+        'control':  ['is_brand'],
+        'campaign': camp_cols,
     }
+
+    # ── Campaign summary table  ─────────────────────────────────────
+    if 'receipt_no' in df.columns:
+        agg = (df.groupby(['voucher_code', 'is_brand'])
+                 .agg(total_amount=('amount',     'sum'),
+                      avg_amount  =('amount',     'mean'),
+                      n_receipts  =('receipt_no', 'nunique'))
+                 .reset_index()
+                 .sort_values('total_amount', ascending=False))
+    else:
+        agg = (df.groupby(['voucher_code', 'is_brand'])
+                 .agg(total_amount=('amount', 'sum'),
+                      avg_amount  =('amount', 'mean'),
+                      n_receipts  =('amount', 'count'))
+                 .reset_index()
+                 .sort_values('total_amount', ascending=False))
+
+    result['campaign_summary'] = to_records(agg)
     return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
-def build_summary(reg1: dict, reg2: dict) -> list:
+def build_summary(reg1: dict) -> list:
     rows = []
-    for key, res in [('regression_1_amount', reg1), ('regression_2_amount', reg2)]:
+    for key, res in [('regression_1_amount', reg1)]:
         if 'error' in res:
             rows.append({'model_key': key, 'error': res.get('error')})
             continue
@@ -326,19 +263,17 @@ def main(cleaned_folder: str, combined_folder: str, mapping_file: str = ''):
 
     # Run regressions
     reg1 = regression_1(campaign)
-    reg2 = regression_2(campaign)
 
     # Output
     output = {
         'linear_regression': {
             'regression_1_amount': reg1,
-            'regression_2_amount': reg2,
-            'summary':             build_summary(reg1, reg2),
+            'summary':             build_summary(reg1),
         }
     }
 
     # Print summary
-    for name, res in [('Regression 1', reg1), ('Regression 2', reg2)]:
+    for name, res in [('Regression 1', reg1)]:
         if 'error' in res:
             print(f"\n  ⚠️  {name}: {res['error']}")
         else:
