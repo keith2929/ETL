@@ -169,7 +169,7 @@ def get_reg_filtered(cleaned_path: str,
                      filt_outlet: tuple,
                      filt_months: tuple) -> dict:
     try:
-        from linear_regression_FINAL import regression_1, regression_2, build_summary
+        from linear_regression_FINAL import regression_1, build_summary
     except Exception as e:
         return {'__error': f'Cannot import linear_regression_FINAL: {e}'}
     df = load_campaign_csv(cleaned_path)
@@ -180,10 +180,8 @@ def get_reg_filtered(cleaned_path: str,
         return {'__error': 'No rows remain after applying the selected filters.'}
     try:
         r1 = regression_1(df)
-        r2 = regression_2(df)
         return {
             'regression_1_amount': r1,
-            'regression_2_amount': r2,
             'summary':             build_summary(r1, r2),
         }
     except Exception as e:
@@ -754,8 +752,7 @@ with tab_reg:
 
         # ── Model selector ────────────────────────────────────────────────────
         model_options = {
-            'Regression 1 — Y = Amount (outlet×month)': 'regression_1_amount',
-            'Regression 2 — Y = Amount (per receipt)':  'regression_2_amount',
+            'Regression 1 — Y = Amount (per receipt, by campaign)': 'regression_1_amount'
         }
         selected_label = st.radio(
             "Select model", list(model_options.keys()), horizontal=True
@@ -840,23 +837,42 @@ with tab_reg:
             if camp_summary and model_options[selected_label] == 'regression_1_amount':
                 st.markdown("---")
                 st.markdown("#### 🏆 Campaign Revenue Summary")
-                st.caption("Total revenue, average spend per receipt, and redemption count per campaign. Sorted by total revenue.")
+                st.caption("Total revenue, average spend per receipt, and redemption count per campaign. Sorted by total revenue. 🟡 = statistically significant in regression (p<0.05)")
 
                 df_camp = pd.DataFrame(camp_summary)
 
-                # is_brand
+                # is_brand → Source
                 if 'is_brand' in df_camp.columns:
                     df_camp['source'] = df_camp['is_brand'].map({0: 'Mall', 1: 'Brand'})
                     df_camp = df_camp.drop(columns=['is_brand'])
 
-                # column order
+                # significant campaigns (from coef_table)
+                sig_camps = set()
+                if coef_table:
+                    df_coef_sig = pd.DataFrame(coef_table)
+                    sig_rows = df_coef_sig[
+                        (df_coef_sig['significant'] == True) &
+                        (df_coef_sig['feature'].str.startswith('camp_'))
+                    ]
+                    # remove camp_ prefix and match with voucher_code
+                    for feat in sig_rows['feature'].tolist():
+                        sig_camps.add(feat.replace('camp_', '', 1))
+
                 col_order = [c for c in ['voucher_code', 'source', 'total_amount',
                                         'avg_amount', 'n_receipts'] if c in df_camp.columns]
                 df_camp = df_camp[col_order]
 
-                # number format
+                # highlight significant rows
+                def hl_camp(row):
+                    # if voucher_code is in significant camp list -> yellow
+                    code = str(row.get('voucher_code', ''))
+                    for s in sig_camps:
+                        if s.lower() in code.lower() or code.lower() in s.lower():
+                            return ['background-color:#3d3800; color:#fbbf24'] * len(row)
+                    return [''] * len(row)
+
                 st.dataframe(
-                    df_camp,
+                    df_camp.style.apply(hl_camp, axis=1),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
@@ -872,7 +888,6 @@ with tab_reg:
                 st.markdown("**Top 10 Campaigns by Total Revenue**")
                 top10 = df_camp.head(10).set_index('voucher_code')[['total_amount']]
                 st.bar_chart(top10)
-            st.markdown("---")
 
             # ── VIF ───────────────────────────────────────────────────────────
             vif = model.get('vif', [])
