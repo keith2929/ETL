@@ -93,17 +93,20 @@ def run_ols(df: pd.DataFrame, target: str, features: list, label: str = '') -> d
     # VIF
     from statsmodels.stats.outliers_influence import variance_inflation_factor
     try:
-        result['vif'] = to_records(pd.DataFrame({
-            'feature': features,
-            'vif': [safe_float(variance_inflation_factor(X_const.values, i + 1))
-                    for i in range(len(features))]
-        }))
+        if len(features) <= 10:
+            result['vif'] = to_records(pd.DataFrame({
+                'feature': features,
+                'vif': [safe_float(variance_inflation_factor(X_const.values, i + 1))
+                        for i in range(len(features))]
+            }))
+        else:
+            result['vif'] = []
     except:
         result['vif'] = []
 
     # 5-fold CV
     try:
-        n_splits = min(5, len(subset))
+        n_splits = min(3, len(subset))
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
         rmse_list, mae_list, r2_list = [], [], []
         Xn, yn = X_scaled.values, y.values
