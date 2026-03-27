@@ -29,7 +29,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 MIN_ROWS    = 10
-MAX_DUMMIES = 30   # max voucher code dummies
+MAX_DUMMIES = 67   # max voucher code dummies
 
 
 # ─────────────────────────────────────────────────────────────────────────────
