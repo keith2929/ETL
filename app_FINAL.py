@@ -182,7 +182,7 @@ def get_reg_filtered(cleaned_path: str,
         r1 = regression_1(df)
         return {
             'regression_1_amount': r1,
-            'summary':             build_summary(r1, r2),
+            'summary':             build_summary(r1),
         }
     except Exception as e:
         return {'__error': str(e)}
