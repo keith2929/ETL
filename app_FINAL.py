@@ -886,8 +886,15 @@ with tab_reg:
 
                 # Top 10 bar chart
                 st.markdown("**Top 10 Campaigns by Total Revenue**")
-                top10 = df_camp.head(10).set_index('voucher_code')[['total_amount']]
-                st.bar_chart(top10)
+                top10 = df_camp.head(10).copy()
+                top10_mall  = top10[top10['source'] == 'Mall'].set_index('voucher_code')[['total_amount']].rename(columns={'total_amount': 'Mall'})
+                top10_brand = top10[top10['source'] == 'Brand'].set_index('voucher_code')[['total_amount']].rename(columns={'total_amount': 'Brand'})
+
+                # distinguish mall/brand
+                top10_chart = pd.DataFrame(index=top10['voucher_code'])
+                top10_chart['Mall']  = top10.set_index('voucher_code')['total_amount'].where(top10.set_index('voucher_code')['source'] == 'Mall')
+                top10_chart['Brand'] = top10.set_index('voucher_code')['total_amount'].where(top10.set_index('voucher_code')['source'] == 'Brand')
+                st.bar_chart(top10_chart, color=['#ff5c5c', '#4af0c4'])
 
             # ── VIF ───────────────────────────────────────────────────────────
             vif = model.get('vif', [])
@@ -907,26 +914,6 @@ with tab_reg:
                             st.warning(f"⚠️ Max VIF={mv:.1f} — moderate multicollinearity")
                         else:
                             st.success("✅ All VIF < 5")
-
-            st.markdown("---")
-
-            # ── Residuals ─────────────────────────────────────────────────────
-            residuals = model.get('residuals', [])
-            if residuals:
-                st.markdown("#### Residual Diagnostics")
-                df_resid = pd.DataFrame(residuals)
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("**Fitted vs Residuals**")
-                    st.scatter_chart(df_resid, x='fitted', y='residual', height=280)
-                    st.caption("Ideal: randomly scattered around 0")
-                with c2:
-                    st.markdown("**Standardised Residuals Distribution**")
-                    st.bar_chart(
-                        df_resid['std_resid'].value_counts(bins=15).sort_index(),
-                        height=280,
-                    )
-                    st.caption("Ideal: roughly bell-shaped around 0")
 
             st.markdown("---")
 
