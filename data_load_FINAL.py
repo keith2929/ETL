@@ -140,7 +140,29 @@ def load_and_merge(raw_folder: str) -> pd.DataFrame:
     )
 
     matched = merged['amount'].notna().sum()
+    # ── Clean up insignificant voucher values ─────────────────────────────
+    # min40: remove voucher_value=7 (only 1 transaction)
+    # min300: remove voucher_value=25 (only 2 transactions)
+    before = len(merged)
+    merged = merged[~(
+        (merged['voucher_code'].astype(str).str.lower().str.contains('min40', na=False)) &
+        (merged['voucher_value'].astype(str).str.strip() == '7')
+    )]
+    merged = merged[~(
+        (merged['voucher_code'].astype(str).str.lower().str.contains('min300', na=False)) &
+        (merged['voucher_value'].astype(str).str.strip() == '25')
+    )]
+    removed = before - len(merged)
+    print(f"   Removed {removed} rows with insignificant voucher values (min40-7, min300-25)")
     print(f"   Merged: {matched:,}/{len(merged):,} rows matched on receipt_no")
+
+    # ── Summary stats ─────────────────────────────────────────────────────
+    print(f"\n   📊 Dataset Summary:")
+    print(f"   Mall outlets:        {merged[merged['campaign_source']=='mall']['outlet_name'].nunique()}")
+    print(f"   Brand outlets:       {merged[merged['campaign_source']=='brand']['outlet_name'].nunique()}")
+    print(f"   Mall voucher codes:  {merged[merged['campaign_source']=='mall']['voucher_code'].nunique()}")
+    print(f"   Brand voucher codes: {merged[merged['campaign_source']=='brand']['voucher_code'].nunique()}")
+    print(f"   Total rows:          {len(merged):,}")
 
     return merged
 
