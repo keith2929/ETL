@@ -596,8 +596,8 @@ with tab_tt:
                 return [''] * len(row)
 
             disp_roi = [c for c in ['voucher_code','campaign_source','n_redemptions',
-                                     'total_revenue','avg_revenue',
-                                     'total_voucher_cost','roi','roi_label']
+                         'total_revenue','avg_revenue',
+                         'voucher_value','roi','roi_label']
                         if c in df_roi.columns]
             st.dataframe(
                 df_roi[disp_roi].style.apply(_hl_roi, axis=1),
@@ -608,7 +608,7 @@ with tab_tt:
                     'n_redemptions':      st.column_config.NumberColumn('Redemptions', format='%d'),
                     'total_revenue':      st.column_config.NumberColumn('Total Revenue ($)', format='$%.0f'),
                     'avg_revenue':        st.column_config.NumberColumn('Avg Revenue ($)', format='$%.0f'),
-                    'total_voucher_cost': st.column_config.NumberColumn('Voucher Cost ($)', format='$%.0f'),
+                    'voucher_value': st.column_config.NumberColumn('Voucher Value ($)', format='$%.0f'),
                     'roi':                st.column_config.NumberColumn('ROI', format='%.2fx'),
                 }
             )
