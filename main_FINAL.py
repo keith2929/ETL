@@ -102,6 +102,9 @@ if __name__ == "__main__":
         ("Linear Regression",
          SCRIPT_DIR / "linear_regression_FINAL.py",
          [cleaned_data, combined_data]),
+         ("T-Test & ROI",
+        SCRIPT_DIR / "ttest_FINAL.py",
+        [cleaned_data, combined_data]),
     ]
 
     for label, script_path, args in scripts:
