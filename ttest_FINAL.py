@@ -53,20 +53,6 @@ def normality_test(campaign: pd.DataFrame) -> list:
 
         if len(amounts) < 3:
             results.append({
-                'voucher_code':  code,
-                'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
-                'n':             len(amounts),
-                'mean':          safe_float(np.mean(amounts)) if len(amounts) > 0 else None,
-                'std':           None,
-                'shapiro_stat':  None,
-                'shapiro_p':     None,
-                'normal':        None,
-                'note':          'Too few observations (n<3)',
-            })
-            continue
-
-        if len(amounts) < 3:
-            results.append({
                 'voucher_code':    code,
                 'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
                 'n':               len(amounts),
