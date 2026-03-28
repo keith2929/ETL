@@ -65,25 +65,38 @@ def normality_test(campaign: pd.DataFrame) -> list:
             })
             continue
 
-        # Cap at 5000 for Shapiro-Wilk
+        if len(amounts) < 3:
+            results.append({
+                'voucher_code':    code,
+                'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
+                'n':               len(amounts),
+                'mean':            safe_float(np.mean(amounts)) if len(amounts) > 0 else None,
+                'std':             None,
+                'shapiro_stat':    None,
+                'shapiro_p':       None,
+                'normal':          None,
+                'note':            'Too few observations (n<3)',
+            })
+            continue
+
+        # n > 30: Normal by Central Limit Theorem
         if len(amounts) > 30:
-        results.append({
-            'voucher_code':    code,
-            'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
-            'n':               len(amounts),
-            'mean':            safe_float(np.mean(amounts)),
-            'std':             safe_float(np.std(amounts)),
-            'shapiro_stat':    None,
-            'shapiro_p':       None,
-            'normal':          True,
-            'note':            'Normal by CLT (n>30)',
-        })
-        continue
+            results.append({
+                'voucher_code':    code,
+                'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
+                'n':               len(amounts),
+                'mean':            safe_float(np.mean(amounts)),
+                'std':             safe_float(np.std(amounts)),
+                'shapiro_stat':    None,
+                'shapiro_p':       None,
+                'normal':          True,
+                'note':            'Normal by CLT (n>30)',
+            })
+            continue
 
-        sample = amounts
-
+        # n <= 30: Shapiro-Wilk test
         try:
-            stat, p = stats.shapiro(sample)
+            stat, p = stats.shapiro(amounts)
             results.append({
                 'voucher_code':    code,
                 'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
@@ -97,17 +110,16 @@ def normality_test(campaign: pd.DataFrame) -> list:
             })
         except Exception as e:
             results.append({
-                'voucher_code':  code,
+                'voucher_code':    code,
                 'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
-                'n':             len(amounts),
-                'mean':          safe_float(np.mean(amounts)),
-                'std':           safe_float(np.std(amounts)),
-                'shapiro_stat':  None,
-                'shapiro_p':     None,
-                'normal':        None,
-                'note':          f'Error: {e}',
+                'n':               len(amounts),
+                'mean':            safe_float(np.mean(amounts)),
+                'std':             safe_float(np.std(amounts)),
+                'shapiro_stat':    None,
+                'shapiro_p':       None,
+                'normal':          None,
+                'note':            f'Error: {e}',
             })
-
     return sorted(results, key=lambda x: x.get('n', 0), reverse=True)
 
 
