@@ -132,13 +132,16 @@ def load_campaign_csv(cleaned_data_path: str) -> pd.DataFrame:
 def _apply_filters(df: pd.DataFrame,
                    filt_source: tuple,
                    filt_outlet: tuple,
-                   filt_months: tuple) -> pd.DataFrame:
+                   filt_months: tuple,
+                   filt_campaign: tuple = ()) -> pd.DataFrame:
     if filt_source:
         df = df[df['campaign_source'].isin(filt_source)]
     if filt_outlet:
         df = df[df['outlet_name'].astype(str).isin([str(x) for x in filt_outlet])]
     if filt_months:
         df = df[df['month_year'].isin(filt_months)]
+    if filt_campaign:
+        df = df[df['voucher_code'].astype(str).isin([str(x) for x in filt_campaign])]
     return df
 
 
@@ -146,7 +149,8 @@ def _apply_filters(df: pd.DataFrame,
 def get_ts_filtered(cleaned_path: str,
                     filt_source: tuple,
                     filt_outlet: tuple,
-                    filt_months: tuple) -> dict:
+                    filt_months: tuple,
+                    filt_campaign: tuple = ()) -> dict:
     try:
         from regression_FINAL import analyse_time_series
     except Exception as e:
@@ -154,7 +158,7 @@ def get_ts_filtered(cleaned_path: str,
     df = load_campaign_csv(cleaned_path)
     if df.empty:
         return {'error': 'campaign_all.csv not found or empty — run the pipeline first.'}
-    df = _apply_filters(df, filt_source, filt_outlet, filt_months)
+    df = _apply_filters(df, filt_source, filt_outlet, filt_months, filt_campaign)
     if df.empty:
         return {'error': 'No rows remain after applying the selected filters.'}
     try:
@@ -167,7 +171,8 @@ def get_ts_filtered(cleaned_path: str,
 def get_reg_filtered(cleaned_path: str,
                      filt_source: tuple,
                      filt_outlet: tuple,
-                     filt_months: tuple) -> dict:
+                     filt_months: tuple,
+                     filt_campaign: tuple = ()) -> dict:
     try:
         from linear_regression_FINAL import regression_1, build_summary
     except Exception as e:
@@ -175,7 +180,7 @@ def get_reg_filtered(cleaned_path: str,
     df = load_campaign_csv(cleaned_path)
     if df.empty:
         return {'__error': 'campaign_all.csv not found or empty — run the pipeline first.'}
-    df = _apply_filters(df, filt_source, filt_outlet, filt_months)
+    df = _apply_filters(df, filt_source, filt_outlet, filt_months, filt_campaign)
     if df.empty:
         return {'__error': 'No rows remain after applying the selected filters.'}
     try:
@@ -183,6 +188,37 @@ def get_reg_filtered(cleaned_path: str,
         return {
             'regression_1_amount': r1,
             'summary':             build_summary(r1),
+        }
+    except Exception as e:
+        return {'__error': str(e)}
+
+
+@st.cache_data(show_spinner=False)
+def get_tt_filtered(cleaned_path: str,
+                    filt_source: tuple,
+                    filt_outlet: tuple,
+                    filt_months: tuple,
+                    filt_campaign: tuple) -> dict:
+    try:
+        from ttest_FINAL import normality_test, one_sample_ttest, roi_analysis, summary_stats
+    except Exception as e:
+        return {'__error': f'Cannot import ttest_FINAL: {e}'}
+    df = load_campaign_csv(cleaned_path)
+    if df.empty:
+        return {'__error': 'campaign_all.csv not found or empty — run the pipeline first.'}
+    df = _apply_filters(df, filt_source, filt_outlet, filt_months, filt_campaign)
+    if df.empty:
+        return {'__error': 'No rows remain after applying the selected filters.'}
+    df['amount'] = pd.to_numeric(df.get('amount', pd.Series(dtype=float)), errors='coerce')
+    df = df.dropna(subset=['amount']).reset_index(drop=True)
+    if df.empty:
+        return {'__error': 'No rows with valid amount after filtering.'}
+    try:
+        return {
+            'summary':   summary_stats(df),
+            'normality': normality_test(df),
+            'ttest':     one_sample_ttest(df),
+            'roi':       roi_analysis(df),
         }
     except Exception as e:
         return {'__error': str(e)}
@@ -246,6 +282,7 @@ if st.session_state.running and st.session_state.log_queue is not None:
             load_campaign_csv.clear()
             get_ts_filtered.clear()
             get_reg_filtered.clear()
+            get_tt_filtered.clear()
         else:
             st.session_state.log_lines.append(_peek.rstrip())
             st.session_state.last_queue_check = time.time()
@@ -326,75 +363,10 @@ _camp_csv  = Path(_cleaned_path) / 'campaign_all.csv' if _cleaned_path else Path
 _data_ready = _camp_csv.exists()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Global Filters  (shown only when campaign_all.csv exists)
+# Global filter state — each tab manages its own expander, inheriting these defaults
 # ═══════════════════════════════════════════════════════════════════════════════
-filt_source: tuple = ()
-filt_outlet: tuple = ()
-filt_months: tuple = ()
-
-if _data_ready:
-    _filter_df = load_campaign_csv(_cleaned_path)
-
-    with st.expander(
-        "🔽  Global Filters  —  applied to Time Series & Regression tabs",
-        expanded=False,
-    ):
-        fc1, fc2, fc3 = st.columns(3)
-
-        with fc1:
-            src_opts = (
-                sorted(_filter_df['campaign_source'].dropna().astype(str).unique().tolist())
-                if 'campaign_source' in _filter_df.columns else []
-            )
-            filt_source = tuple(
-                st.multiselect("Campaign Source", src_opts,
-                               key="filt_source", placeholder="All sources")
-            )
-
-        with fc2:
-            oc_opts = (
-                sorted(_filter_df['outlet_name'].dropna().astype(str).unique().tolist())
-                if 'outlet_name' in _filter_df.columns else []
-            )
-            filt_outlet = tuple(
-                st.multiselect("Outlet Name", oc_opts,
-                               key="filt_outlet", placeholder="All outlets")
-            )
-
-        with fc3:
-            try:
-                my_opts = sorted(
-                    _filter_df['month_year'].dropna().astype(str).unique().tolist(),
-                    key=lambda x: pd.to_datetime(x, format='%b-%Y', errors='coerce'),
-                ) if 'month_year' in _filter_df.columns else []
-            except Exception:
-                my_opts = sorted(
-                    _filter_df['month_year'].dropna().astype(str).unique().tolist()
-                ) if 'month_year' in _filter_df.columns else []
-
-            filt_months = tuple(
-                st.multiselect("Month", my_opts,
-                               key="filt_months", placeholder="All months")
-            )
-
-        active_parts = []
-        if filt_source: active_parts.append(f"Source: {', '.join(filt_source)}")
-        if filt_outlet: active_parts.append(f"Outlet: {', '.join(str(x) for x in filt_outlet)}")
-        if filt_months: active_parts.append(f"Months: {', '.join(filt_months)}")
-
-        if active_parts:
-            st.caption(f"🔍 Active filters: {' | '.join(active_parts)}")
-        else:
-            st.caption("No filters active — showing pre-computed results from last pipeline run.")
-
-elif _cleaned_path and not is_new:
-    st.caption("ℹ️ Run the pipeline first to enable global filters.")
-
-_filters_active = bool(filt_source or filt_outlet or filt_months)
-active_parts    = []   # ensure defined even if _data_ready is False
-if filt_source: active_parts.append(f"Source: {', '.join(filt_source)}")
-if filt_outlet: active_parts.append(f"Outlet: {', '.join(str(x) for x in filt_outlet)}")
-if filt_months: active_parts.append(f"Months: {', '.join(filt_months)}")
+_filters_active = False   # placeholder; each tab sets its own flag
+active_parts: list = []
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tabs
@@ -437,6 +409,7 @@ with tab_run:
         load_campaign_csv.clear()
         get_ts_filtered.clear()
         get_reg_filtered.clear()
+        get_tt_filtered.clear()
         threading.Thread(
             target=run_pipeline,
             args=(st.session_state.run_config, q),
@@ -456,6 +429,7 @@ with tab_run:
                     load_campaign_csv.clear()
                     get_ts_filtered.clear()
                     get_reg_filtered.clear()
+                    get_tt_filtered.clear()
                     break
                 st.session_state.log_lines.append(line.rstrip())
                 st.session_state.last_queue_check = time.time()
@@ -503,13 +477,102 @@ with tab_run:
 # TAB 5 — T-TEST & ROI
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_tt:
-    tt_path = Path(_combined_path) / 'ttest_results.json' if _combined_path else Path('')
+    # ── T-Test tab-local filters ──────────────────────────────────────────────
+    tt_filters_active = False
+    tt_active_parts   = []
 
-    if not tt_path.exists():
-        st.info("No T-Test results yet — run the pipeline first.")
+    if _data_ready:
+        _tt_df = load_campaign_csv(_cleaned_path)
+
+        with st.expander("🔽  T-Test Filters  —  refine which data this tab analyses", expanded=False):
+            tf1, tf2, tf3, tf4 = st.columns(4)
+
+            with tf1:
+                tt_src_opts = (
+                    sorted(_tt_df['campaign_source'].dropna().astype(str).unique().tolist())
+                    if 'campaign_source' in _tt_df.columns else []
+                )
+                tt_filt_source = tuple(
+                    st.multiselect("Campaign Source", tt_src_opts,
+                                   key="tt_filt_source", placeholder="All sources")
+                )
+
+            with tf2:
+                tt_oc_opts = (
+                    sorted(_tt_df['outlet_name'].dropna().astype(str).unique().tolist())
+                    if 'outlet_name' in _tt_df.columns else []
+                )
+                tt_filt_outlet = tuple(
+                    st.multiselect("Outlet Name", tt_oc_opts,
+                                   key="tt_filt_outlet", placeholder="All outlets")
+                )
+
+            with tf3:
+                try:
+                    tt_my_opts = sorted(
+                        _tt_df['month_year'].dropna().astype(str).unique().tolist(),
+                        key=lambda x: pd.to_datetime(x, format='%b-%Y', errors='coerce'),
+                    ) if 'month_year' in _tt_df.columns else []
+                except Exception:
+                    tt_my_opts = sorted(
+                        _tt_df['month_year'].dropna().astype(str).unique().tolist()
+                    ) if 'month_year' in _tt_df.columns else []
+                tt_filt_months = tuple(
+                    st.multiselect("Month", tt_my_opts,
+                                   key="tt_filt_months", placeholder="All months")
+                )
+
+            with tf4:
+                # Pre-filter by source/outlet/month to get relevant campaigns
+                _tt_df_pre = _apply_filters(_tt_df, tt_filt_source, tt_filt_outlet, tt_filt_months)
+                tt_camp_opts = (
+                    sorted(_tt_df_pre['voucher_code'].dropna().astype(str).unique().tolist())
+                    if 'voucher_code' in _tt_df_pre.columns else []
+                )
+                tt_filt_campaign = tuple(
+                    st.multiselect("Campaign (Voucher Code)", tt_camp_opts,
+                                   key="tt_filt_campaign", placeholder="All campaigns")
+                )
+
+            tt_active_parts = []
+            if tt_filt_source:   tt_active_parts.append(f"Source: {', '.join(tt_filt_source)}")
+            if tt_filt_outlet:   tt_active_parts.append(f"Outlet: {', '.join(str(x) for x in tt_filt_outlet)}")
+            if tt_filt_months:   tt_active_parts.append(f"Months: {', '.join(tt_filt_months)}")
+            if tt_filt_campaign: tt_active_parts.append(f"Campaign: {', '.join(tt_filt_campaign)}")
+
+            if tt_active_parts:
+                st.caption(f"🔍 Active filters: {' | '.join(tt_active_parts)}")
+            else:
+                st.caption("No filters active — showing pre-computed results from last pipeline run.")
+
+        tt_filters_active = bool(tt_filt_source or tt_filt_outlet or tt_filt_months or tt_filt_campaign)
     else:
-        with open(tt_path) as f:
-            tt_data = json.load(f).get('ttest_analysis', {})
+        tt_filt_source   = ()
+        tt_filt_outlet   = ()
+        tt_filt_months   = ()
+        tt_filt_campaign = ()
+
+    # ── Load data: filtered (live) or pre-computed JSON ───────────────────
+    if tt_filters_active:
+        with st.spinner("Running T-Test & ROI on filtered data…"):
+            tt_raw = get_tt_filtered(_cleaned_path, tt_filt_source, tt_filt_outlet,
+                                     tt_filt_months, tt_filt_campaign)
+        if tt_raw.get('__error'):
+            st.warning(tt_raw['__error'])
+            tt_raw = {}
+        tt_data = tt_raw
+    else:
+        tt_path = Path(_combined_path) / 'ttest_results.json' if _combined_path else Path('')
+        if not tt_path.exists():
+            st.info("No T-Test results yet — run the pipeline first.")
+            tt_data = {}
+        else:
+            with open(tt_path) as f:
+                tt_data = json.load(f).get('ttest_analysis', {})
+
+    if tt_data:
+        if tt_filters_active and tt_active_parts:
+            st.caption(f"🔍 Showing filtered results — {' | '.join(tt_active_parts)}")
 
         summ      = tt_data.get('summary', {})
         ttest     = tt_data.get('ttest', [])
@@ -577,7 +640,6 @@ with tab_tt:
         if roi:
             df_roi = pd.DataFrame(roi)
 
-            # Top 10 ROI bar chart
             df_roi_valid = df_roi[df_roi['roi'].notna()].copy()
             if not df_roi_valid.empty:
                 top10_roi = df_roi_valid.head(10).copy()
@@ -651,6 +713,7 @@ with tab_tt:
                 }
             )
             st.caption("🟢 Green = normal | 🔴 Red = not normal")
+
             # ── Significant + Normal ──────────────────────────────────────────
             st.markdown("---")
             st.markdown("### ✅ Most Reliable Results — Significant & Normally Distributed")
@@ -721,20 +784,38 @@ with tab_tt:
                         )
                 else:
                     st.info("No campaigns found that are both significant and normally distributed.")
+
         # ── Download ──────────────────────────────────────────────────────
         st.markdown("---")
-        tt_xlsx = Path(_combined_path) / 'ttest_results.xlsx' if _combined_path else Path('')
-        if tt_xlsx.exists():
-            with open(tt_xlsx, 'rb') as fh:
+        if tt_filters_active:
+            # Build in-memory Excel for filtered results
+            _tt_buf = __import__('io').BytesIO()
+            try:
+                with pd.ExcelWriter(_tt_buf, engine='openpyxl') as _w:
+                    pd.DataFrame([summ]).to_excel(_w, sheet_name='Summary',   index=False)
+                    pd.DataFrame(ttest).to_excel(_w, sheet_name='T-Test',     index=False)
+                    pd.DataFrame(roi).to_excel(  _w, sheet_name='ROI',        index=False)
+                    pd.DataFrame(normality).to_excel(_w, sheet_name='Normality', index=False)
                 st.download_button(
-                    "⬇️  Download T-Test & ROI Report (.xlsx)",
-                    data=fh.read(),
-                    file_name='ttest_results.xlsx',
+                    "⬇️  Download Filtered T-Test & ROI Report (.xlsx)",
+                    data=_tt_buf.getvalue(),
+                    file_name='ttest_results_filtered.xlsx',
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     type='primary',
                 )
-
-
+            except Exception:
+                pass
+        else:
+            tt_xlsx = Path(_combined_path) / 'ttest_results.xlsx' if _combined_path else Path('')
+            if tt_xlsx.exists():
+                with open(tt_xlsx, 'rb') as fh:
+                    st.download_button(
+                        "⬇️  Download T-Test & ROI Report (.xlsx)",
+                        data=fh.read(),
+                        file_name='ttest_results.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        type='primary',
+                    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — CONFIG
@@ -780,6 +861,7 @@ with tab_config:
         load_campaign_csv.clear()
         get_ts_filtered.clear()
         get_reg_filtered.clear()
+        get_tt_filtered.clear()
         if is_new:
             st.rerun()
 
@@ -788,9 +870,42 @@ with tab_config:
 # TAB 3 — TIME SERIES
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_ts:
-    if _filters_active:
+    # ── Filters ───────────────────────────────────────────────────────────────
+    ts_filters_active = False
+    ts_active_parts: list = []
+
+    if _data_ready:
+        _ts_df = load_campaign_csv(_cleaned_path)
+        with st.expander("🔽  Filters", expanded=False):
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            with _c1:
+                _opts = sorted(_ts_df['campaign_source'].dropna().astype(str).unique().tolist()) if 'campaign_source' in _ts_df.columns else []
+                ts_filt_source = tuple(st.multiselect("Campaign Source", _opts, key="ts_filt_source", placeholder="All sources"))
+            with _c2:
+                _opts = sorted(_ts_df['outlet_name'].dropna().astype(str).unique().tolist()) if 'outlet_name' in _ts_df.columns else []
+                ts_filt_outlet = tuple(st.multiselect("Outlet Name", _opts, key="ts_filt_outlet", placeholder="All outlets"))
+            with _c3:
+                try:
+                    _opts = sorted(_ts_df['month_year'].dropna().astype(str).unique().tolist(), key=lambda x: pd.to_datetime(x, format='%b-%Y', errors='coerce')) if 'month_year' in _ts_df.columns else []
+                except Exception:
+                    _opts = sorted(_ts_df['month_year'].dropna().astype(str).unique().tolist()) if 'month_year' in _ts_df.columns else []
+                ts_filt_months = tuple(st.multiselect("Month", _opts, key="ts_filt_months", placeholder="All months"))
+            with _c4:
+                _pre = _apply_filters(_ts_df, ts_filt_source, ts_filt_outlet, ts_filt_months)
+                _opts = sorted(_pre['voucher_code'].dropna().astype(str).unique().tolist()) if 'voucher_code' in _pre.columns else []
+                ts_filt_campaign = tuple(st.multiselect("Campaign", _opts, key="ts_filt_campaign", placeholder="All campaigns"))
+            if ts_filt_source:   ts_active_parts.append(f"Source: {', '.join(ts_filt_source)}")
+            if ts_filt_outlet:   ts_active_parts.append(f"Outlet: {', '.join(str(x) for x in ts_filt_outlet)}")
+            if ts_filt_months:   ts_active_parts.append(f"Months: {', '.join(ts_filt_months)}")
+            if ts_filt_campaign: ts_active_parts.append(f"Campaign: {', '.join(ts_filt_campaign)}")
+            st.caption(f"🔍 {' | '.join(ts_active_parts)}" if ts_active_parts else "No filters active — showing pre-computed results.")
+        ts_filters_active = bool(ts_filt_source or ts_filt_outlet or ts_filt_months or ts_filt_campaign)
+    else:
+        ts_filt_source = ts_filt_outlet = ts_filt_months = ts_filt_campaign = ()
+
+    if ts_filters_active:
         with st.spinner("Running time series on filtered data…"):
-            ts = get_ts_filtered(_cleaned_path, filt_source, filt_outlet, filt_months)
+            ts = get_ts_filtered(_cleaned_path, ts_filt_source, ts_filt_outlet, ts_filt_months, ts_filt_campaign)
     else:
         ts = read_ts_json(_combined_path)
 
@@ -799,8 +914,8 @@ with tab_ts:
     elif ts.get('error'):
         st.warning(ts['error'])
     else:
-        if _filters_active and active_parts:
-            st.caption(f"🔍 Showing filtered results — {' | '.join(active_parts)}")
+        if ts_filters_active and ts_active_parts:
+            st.caption(f"🔍 Showing filtered results — {' | '.join(ts_active_parts)}")
 
         # ── Monthly Amount trend ──────────────────────────────────────────────
         st.markdown("### 📈 Monthly Member Spend (Amount)")
@@ -910,7 +1025,7 @@ with tab_ts:
         st.markdown("---")
 
         # ── Download ──────────────────────────────────────────────────────────
-        if _filters_active:
+        if ts_filters_active:
             xlsx = _ts_to_excel(ts)
             if xlsx:
                 st.download_button(
@@ -937,9 +1052,42 @@ with tab_ts:
 # TAB 4 — REGRESSION
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_reg:
-    if _filters_active:
+    # ── Filters ───────────────────────────────────────────────────────────────
+    reg_filters_active = False
+    reg_active_parts: list = []
+
+    if _data_ready:
+        _reg_df = load_campaign_csv(_cleaned_path)
+        with st.expander("🔽  Filters", expanded=False):
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            with _c1:
+                _opts = sorted(_reg_df['campaign_source'].dropna().astype(str).unique().tolist()) if 'campaign_source' in _reg_df.columns else []
+                reg_filt_source = tuple(st.multiselect("Campaign Source", _opts, key="reg_filt_source", placeholder="All sources"))
+            with _c2:
+                _opts = sorted(_reg_df['outlet_name'].dropna().astype(str).unique().tolist()) if 'outlet_name' in _reg_df.columns else []
+                reg_filt_outlet = tuple(st.multiselect("Outlet Name", _opts, key="reg_filt_outlet", placeholder="All outlets"))
+            with _c3:
+                try:
+                    _opts = sorted(_reg_df['month_year'].dropna().astype(str).unique().tolist(), key=lambda x: pd.to_datetime(x, format='%b-%Y', errors='coerce')) if 'month_year' in _reg_df.columns else []
+                except Exception:
+                    _opts = sorted(_reg_df['month_year'].dropna().astype(str).unique().tolist()) if 'month_year' in _reg_df.columns else []
+                reg_filt_months = tuple(st.multiselect("Month", _opts, key="reg_filt_months", placeholder="All months"))
+            with _c4:
+                _pre = _apply_filters(_reg_df, reg_filt_source, reg_filt_outlet, reg_filt_months)
+                _opts = sorted(_pre['voucher_code'].dropna().astype(str).unique().tolist()) if 'voucher_code' in _pre.columns else []
+                reg_filt_campaign = tuple(st.multiselect("Campaign", _opts, key="reg_filt_campaign", placeholder="All campaigns"))
+            if reg_filt_source:   reg_active_parts.append(f"Source: {', '.join(reg_filt_source)}")
+            if reg_filt_outlet:   reg_active_parts.append(f"Outlet: {', '.join(str(x) for x in reg_filt_outlet)}")
+            if reg_filt_months:   reg_active_parts.append(f"Months: {', '.join(reg_filt_months)}")
+            if reg_filt_campaign: reg_active_parts.append(f"Campaign: {', '.join(reg_filt_campaign)}")
+            st.caption(f"🔍 {' | '.join(reg_active_parts)}" if reg_active_parts else "No filters active — showing pre-computed results.")
+        reg_filters_active = bool(reg_filt_source or reg_filt_outlet or reg_filt_months or reg_filt_campaign)
+    else:
+        reg_filt_source = reg_filt_outlet = reg_filt_months = reg_filt_campaign = ()
+
+    if reg_filters_active:
         with st.spinner("Running regression on filtered data…"):
-            lr_raw = get_reg_filtered(_cleaned_path, filt_source, filt_outlet, filt_months)
+            lr_raw = get_reg_filtered(_cleaned_path, reg_filt_source, reg_filt_outlet, reg_filt_months, reg_filt_campaign)
         if lr_raw.get('__error'):
             st.warning(lr_raw['__error'])
             lr = {}
@@ -953,8 +1101,8 @@ with tab_reg:
         lr = {}
 
     if lr:
-        if _filters_active and active_parts:
-            st.caption(f"🔍 Showing filtered results — {' | '.join(active_parts)}")
+        if reg_filters_active and reg_active_parts:
+            st.caption(f"🔍 Showing filtered results — {' | '.join(reg_active_parts)}")
 
         # ── Summary ───────────────────────────────────────────────────────────
         st.markdown("### 📊 Model Comparison Summary")
@@ -1151,7 +1299,7 @@ with tab_reg:
             st.markdown("---")
 
         # ── Download ──────────────────────────────────────────────────────────
-        if _filters_active:
+        if reg_filters_active:
             xlsx = _reg_to_excel(lr)
             if xlsx:
                 st.download_button(
