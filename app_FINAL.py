@@ -527,7 +527,7 @@ with tab_tt:
             # Top 10 ROI bar chart
             df_roi_valid = df_roi[df_roi['roi'].notna()].copy()
             if not df_roi_valid.empty:
-            top10_roi = df_roi_valid.head(10).copy()
+                top10_roi = df_roi_valid.head(10).copy()
             st.markdown("**Top 10 Campaigns by ROI**")
             top10_roi_chart = pd.DataFrame(index=top10_roi['voucher_code'])
             top10_roi_chart['Mall']  = top10_roi.set_index('voucher_code')['roi'].where(
