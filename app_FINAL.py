@@ -427,9 +427,7 @@ with tab_run:
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
-    # ── Start pipeline ─────────────────────────────────────────────────────────
     if run_clicked and not st.session_state.running:
-        # Snapshot the config at click-time — stored separately from the dropdown
         st.session_state.run_config        = selected_config
         st.session_state.log_lines         = []
         st.session_state.last_exit         = None
@@ -437,7 +435,6 @@ with tab_run:
         st.session_state.last_queue_check  = time.time()
         q = queue.Queue()
         st.session_state.log_queue = q
-        # Clear analysis caches so tabs pick up fresh data after the run
         load_campaign_csv.clear()
         get_ts_filtered.clear()
         get_reg_filtered.clear()
@@ -446,6 +443,63 @@ with tab_run:
             args=(st.session_state.run_config, q),
             daemon=True,
         ).start()
+
+    # ── Drain the queue (non-blocking) ────────────────────────────────────────
+    if st.session_state.running and st.session_state.log_queue is not None:
+        q = st.session_state.log_queue
+        drained = 0
+        while drained < 200:
+            try:
+                line = q.get_nowait()
+                if line.startswith("__EXIT__"):
+                    st.session_state.last_exit = int(line.replace("__EXIT__", ""))
+                    st.session_state.running   = False
+                    load_campaign_csv.clear()
+                    get_ts_filtered.clear()
+                    get_reg_filtered.clear()
+                    break
+                st.session_state.log_lines.append(line.rstrip())
+                st.session_state.last_queue_check = time.time()
+                drained += 1
+            except queue.Empty:
+                break
+
+    # ── Status + log display ──────────────────────────────────────────────────
+    if (st.session_state.running
+            or st.session_state.log_lines
+            or st.session_state.last_exit is not None):
+
+        _rc = st.session_state.run_config or selected_config
+        st.caption(f"Config used: **{_rc}**")
+
+        all_log  = "\n".join(st.session_state.log_lines)
+        etl_done = "ETL COMPLETED"               in all_log
+        ts_done  = "TIME SERIES"  in all_log and "COMPLETED" in all_log
+        reg_done = "LINEAR REGRESSION COMPLETED" in all_log
+        tt_done  = "T-TEST & ROI ANALYSIS COMPLETED" in all_log
+
+        if st.session_state.running:
+            if tt_done:    st.info("⏳ Finalising…")
+            elif reg_done: st.info("✅ Linear Regression done — running T-Test & ROI…")
+            elif ts_done:  st.info("✅ Time Series done — running Linear Regression…")
+            elif etl_done: st.info("✅ ETL done — running Time Series…")
+            else:          st.info("⏳ Running ETL…")
+        elif st.session_state.last_exit == 0:
+            st.success("✅ ETL  ·  ✅ Time Series  ·  ✅ Linear Regression  ·  ✅ T-Test & ROI — all complete!")
+        elif st.session_state.last_exit is not None:
+            errs = [l for l in st.session_state.log_lines if 'error' in l.lower()]
+            st.error(f"❌ Pipeline failed — {errs[-1] if errs else 'Check logs below'}")
+
+        if st.session_state.log_lines:
+            _hide = ('DEBUG ', 'Loading configuration', 'raw_data from',
+                     'cleaned_data from', 'schemas from',
+                     'FutureWarning', 'DeprecationWarning', 'UserWarning', 'warnings.warn')
+            visible = [l for l in st.session_state.log_lines[-300:]
+                       if not any(p in l for p in _hide)]
+            st.markdown(
+                f'<div class="log-box">{chr(10).join(visible)}</div>',
+                unsafe_allow_html=True,
+            )
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — T-TEST & ROI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -527,14 +581,14 @@ with tab_tt:
             # Top 10 ROI bar chart
             df_roi_valid = df_roi[df_roi['roi'].notna()].copy()
             if not df_roi_valid.empty:
-            top10_roi = df_roi_valid.head(10).copy()
-            st.markdown("**Top 10 Campaigns by ROI**")
-            top10_roi_chart = pd.DataFrame(index=top10_roi['voucher_code'])
-            top10_roi_chart['Mall']  = top10_roi.set_index('voucher_code')['roi'].where(
-                top10_roi.set_index('voucher_code')['campaign_source'] == 'mall')
-            top10_roi_chart['Brand'] = top10_roi.set_index('voucher_code')['roi'].where(
-                top10_roi.set_index('voucher_code')['campaign_source'] == 'brand')
-            st.bar_chart(top10_roi_chart, color=['#ff5c5c', '#4af0c4'])
+                top10_roi = df_roi_valid.head(10).copy()
+                st.markdown("**Top 10 Campaigns by ROI**")
+                top10_roi_chart = pd.DataFrame(index=top10_roi['voucher_code'])
+                top10_roi_chart['Mall']  = top10_roi.set_index('voucher_code')['roi'].where(
+                    top10_roi.set_index('voucher_code')['campaign_source'] == 'mall')
+                top10_roi_chart['Brand'] = top10_roi.set_index('voucher_code')['roi'].where(
+                    top10_roi.set_index('voucher_code')['campaign_source'] == 'brand')
+                st.bar_chart(top10_roi_chart, color=['#ff5c5c', '#4af0c4'])
 
             def _hl_roi(row):
                 r = row.get('roi')
@@ -598,6 +652,79 @@ with tab_tt:
                 }
             )
             st.caption("🟢 Green = normal | 🔴 Red = not normal")
+        # ── Significant + Normal ──────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### ✅ Most Reliable Results — Significant & Normally Distributed")
+        st.caption("Campaigns that are both statistically significant (t-test p<0.05) AND normally distributed (Shapiro-Wilk p≥0.05). These are the most trustworthy findings.")
+
+        if ttest and normality:
+            ttest_dict    = {r['voucher_code']: r for r in ttest}
+            normality_dict = {r['voucher_code']: r for r in normality}
+
+            reliable = []
+            for code, t in ttest_dict.items():
+                n = normality_dict.get(code, {})
+                if t.get('significant') and n.get('normal'):
+                    reliable.append({
+                        'voucher_code':    code,
+                        'campaign_source': t.get('campaign_source'),
+                        'n':               t.get('n'),
+                        'campaign_mean':   t.get('campaign_mean'),
+                        'overall_mean':    t.get('overall_mean'),
+                        'diff_from_mean':  t.get('diff_from_mean'),
+                        'direction':       t.get('direction'),
+                        'p_ttest':         t.get('p_value'),
+                        'p_shapiro':       n.get('shapiro_p'),
+                    })
+
+            if reliable:
+                df_rel = pd.DataFrame(reliable)
+
+                # Metrics
+                above = [r for r in reliable if r['direction'] == 'above']
+                below = [r for r in reliable if r['direction'] == 'below']
+                cr1, cr2, cr3 = st.columns(3)
+                cr1.metric("Total Reliable", len(reliable))
+                cr2.metric("Above Mean ↑",   len(above))
+                cr3.metric("Below Mean ↓",   len(below))
+
+                def _hl_rel(row):
+                    if row.get('direction') == 'above':
+                        return ['background-color:#1a2e1a; color:#4af0c4'] * len(row)
+                    return ['background-color:#2e1a1a; color:#ff5c5c'] * len(row)
+
+                st.dataframe(
+                    df_rel.style.apply(_hl_rel, axis=1),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        'voucher_code':    st.column_config.TextColumn('Campaign'),
+                        'campaign_source': st.column_config.TextColumn('Source'),
+                        'n':               st.column_config.NumberColumn('N', format='%d'),
+                        'campaign_mean':   st.column_config.NumberColumn('Campaign Mean ($)', format='$%.0f'),
+                        'overall_mean':    st.column_config.NumberColumn('Overall Mean ($)', format='$%.0f'),
+                        'diff_from_mean':  st.column_config.NumberColumn('Diff ($)', format='$%.0f'),
+                        'direction':       st.column_config.TextColumn('Direction'),
+                        'p_ttest':         st.column_config.NumberColumn('T-test p', format='%.4f'),
+                        'p_shapiro':       st.column_config.NumberColumn('Shapiro p', format='%.4f'),
+                    }
+                )
+                st.caption("🟢 Green = above overall mean | 🔴 Red = below overall mean")
+
+                # Insight box
+                above_names = ", ".join([r['voucher_code'] for r in above])
+                below_names = ", ".join([r['voucher_code'] for r in below])
+                insight = ""
+                if above:
+                    insight += f"Campaigns significantly above average: {above_names}. "
+                if below:
+                    insight += f"Campaigns significantly below average: {below_names}."
+                if insight:
+                    st.markdown(
+                        f'<div class="insight-box">💡 {insight}</div>',
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.info("No campaigns found that are both significant and normally distributed.")
 
         # ── Download ──────────────────────────────────────────────────────
         st.markdown("---")
@@ -611,61 +738,7 @@ with tab_tt:
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     type='primary',
                 )
-    # ── Drain the queue (non-blocking) ────────────────────────────────────────
-    if st.session_state.running and st.session_state.log_queue is not None:
-        q = st.session_state.log_queue
-        drained = 0
-        while drained < 200:          # cap per-render drain to avoid blocking
-            try:
-                line = q.get_nowait()
-                if line.startswith("__EXIT__"):
-                    st.session_state.last_exit = int(line.replace("__EXIT__", ""))
-                    st.session_state.running   = False
-                    load_campaign_csv.clear()
-                    get_ts_filtered.clear()
-                    get_reg_filtered.clear()
-                    break
-                st.session_state.log_lines.append(line.rstrip())
-                st.session_state.last_queue_check = time.time()
-                drained += 1
-            except queue.Empty:
-                break
-
-    # ── Status + log display ──────────────────────────────────────────────────
-    if (st.session_state.running
-            or st.session_state.log_lines
-            or st.session_state.last_exit is not None):
-
-        _rc = st.session_state.run_config or selected_config
-        st.caption(f"Config used: **{_rc}**")
-
-        all_log  = "\n".join(st.session_state.log_lines)
-        etl_done = "ETL COMPLETED"               in all_log
-        ts_done  = "TIME SERIES"  in all_log and "COMPLETED" in all_log
-        reg_done = "LINEAR REGRESSION COMPLETED" in all_log
-
-        if st.session_state.running:
-            if reg_done:   st.info("⏳ Finalising…")
-            elif ts_done:  st.info("✅ Time Series done — running Linear Regression…")
-            elif etl_done: st.info("✅ ETL done — running Time Series…")
-            else:          st.info("⏳ Running ETL…")
-        elif st.session_state.last_exit == 0:
-            st.success("✅ ETL  ·  ✅ Time Series  ·  ✅ Linear Regression — all complete!")
-        elif st.session_state.last_exit is not None:
-            errs = [l for l in st.session_state.log_lines if 'error' in l.lower()]
-            st.error(f"❌ Pipeline failed — {errs[-1] if errs else 'Check logs below'}")
-
-        if st.session_state.log_lines:
-            _hide = ('DEBUG ', 'Loading configuration', 'raw_data from',
-                     'cleaned_data from', 'schemas from',
-                     'FutureWarning', 'DeprecationWarning', 'UserWarning', 'warnings.warn')
-            visible = [l for l in st.session_state.log_lines[-300:]
-                       if not any(p in l for p in _hide)]
-            st.markdown(
-                f'<div class="log-box">{chr(10).join(visible)}</div>',
-                unsafe_allow_html=True,
-            )
-
+    
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — CONFIG
