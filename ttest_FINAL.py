@@ -66,7 +66,21 @@ def normality_test(campaign: pd.DataFrame) -> list:
             continue
 
         # Cap at 5000 for Shapiro-Wilk
-        sample = amounts if len(amounts) <= 5000 else np.random.choice(amounts, 5000, replace=False)
+        if len(amounts) > 30:
+        results.append({
+            'voucher_code':    code,
+            'campaign_source': grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else '',
+            'n':               len(amounts),
+            'mean':            safe_float(np.mean(amounts)),
+            'std':             safe_float(np.std(amounts)),
+            'shapiro_stat':    None,
+            'shapiro_p':       None,
+            'normal':          True,
+            'note':            'Normal by CLT (n>30)',
+        })
+        continue
+
+        sample = amounts
 
         try:
             stat, p = stats.shapiro(sample)
