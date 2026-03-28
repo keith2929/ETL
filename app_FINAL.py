@@ -15,6 +15,7 @@ Fixes vs previous version:
 import streamlit as st
 import pandas as pd
 import subprocess, sys, os, threading, queue, time, json, io
+import plotly.graph_objects as go
 from pathlib import Path
 
 # ── App dir ────────────────────────────────────────────────────────────────────
@@ -920,19 +921,52 @@ with tab_ts:
         # ── Monthly Amount trend ──────────────────────────────────────────────
         st.markdown("### 📈 Monthly Member Spend (Amount)")
 
-        actual   = ts.get('actual', [])
-        forecast = ts.get('forecast', [])
+        actual     = ts.get('actual', [])
+        forecast   = ts.get('forecast', [])
+        decomp     = ts.get('decomposition', {})
+        adjusted   = ts.get('seasonally_adjusted', [])
+        diag       = ts.get('diagnostics', {})
+        model_info = ts.get('model_info', {})
 
         if actual:
-            df_act  = pd.DataFrame(actual).rename(columns={'value': 'Actual Amount'})
-            df_fore = (pd.DataFrame(forecast).rename(columns={'forecast': 'Forecast'})
-                       if forecast else pd.DataFrame())
-            df_chart = df_act.set_index('month_year')[['Actual Amount']]
-            if not df_fore.empty:
-                df_chart = df_chart.join(
-                    df_fore.set_index('month_year')[['Forecast']], how='outer'
-                )
-            st.line_chart(df_chart)
+            df_act  = pd.DataFrame(actual)
+            df_act['month_year'] = pd.to_datetime(df_act['month_year'], format='%b-%Y')
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df_act['month_year'], y=df_act['value'],
+                mode='lines+markers', name='Actual Amount',
+                line=dict(color='#4af0c4')
+            ))
+
+            if forecast:
+                df_fore = pd.DataFrame(forecast)
+                df_fore['month_year'] = pd.to_datetime(df_fore['month_year'], format='%b-%Y')
+                fig.add_trace(go.Scatter(
+                    x=df_fore['month_year'], y=df_fore['forecast'],
+                    mode='lines+markers', name='Forecast',
+                    line=dict(color='#c8f135', dash='dash')
+                ))
+                if 'upper_bound' in df_fore.columns and 'lower_bound' in df_fore.columns:
+                    fig.add_trace(go.Scatter(
+                        x=df_fore['month_year'].tolist() + df_fore['month_year'].tolist()[::-1],
+                        y=df_fore['upper_bound'].tolist() + df_fore['lower_bound'].tolist()[::-1],
+                        fill='toself',
+                        fillcolor='rgba(200,241,53,0.15)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        name='95% Prediction Interval'
+                    ))
+
+            fig.update_layout(
+                xaxis_title='Month', yaxis_title='Amount',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(22,24,28,1)',
+                font=dict(color='#e8eaf0'),
+                xaxis=dict(gridcolor='#2a2d35'), yaxis=dict(gridcolor='#2a2d35')
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            if forecast and 'upper_bound' in pd.DataFrame(forecast).columns:
+                st.caption("Shaded region indicates 95% prediction interval.")
 
         trend = ts.get('trend', {})
         if trend:
@@ -946,6 +980,81 @@ with tab_ts:
             )
 
         st.markdown("---")
+
+        # ── Seasonal Decomposition ────────────────────────────────────────────
+        if decomp and decomp.get('trend') and decomp.get('seasonal'):
+            st.markdown("### 📊 Seasonal Decomposition (STL)")
+            st.caption("Trend, seasonal, and residual components extracted from the series.")
+
+            def _decomp_df(key):
+                rows = decomp.get(key, [])
+                if not rows:
+                    return pd.DataFrame()
+                d = pd.DataFrame(rows)
+                d['month_year'] = pd.to_datetime(d['month_year'], format='%b-%Y')
+                return d.set_index('month_year')
+
+            trend_df    = _decomp_df('trend')
+            seasonal_df = _decomp_df('seasonal')
+            resid_df    = _decomp_df('residual')
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**Trend**")
+                if not trend_df.empty:
+                    st.line_chart(trend_df, use_container_width=True)
+            with col2:
+                st.markdown("**Seasonal**")
+                if not seasonal_df.empty:
+                    st.line_chart(seasonal_df, use_container_width=True)
+            with col3:
+                st.markdown("**Residual**")
+                if not resid_df.empty:
+                    st.line_chart(resid_df, use_container_width=True)
+
+            st.markdown("---")
+
+        # ── Seasonally Adjusted ───────────────────────────────────────────────
+        if adjusted:
+            st.markdown("### 📉 Seasonally Adjusted Spend")
+            adj_df = pd.DataFrame(adjusted)
+            adj_df['month_year'] = pd.to_datetime(adj_df['month_year'], format='%b-%Y')
+            adj_df = adj_df.set_index('month_year')
+            st.line_chart(adj_df, use_container_width=True)
+            st.markdown("---")
+
+        # ── Diagnostics & Model Info ──────────────────────────────────────────
+        if diag:
+            st.markdown("### 🔬 Model Diagnostics")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                adf_p = diag.get('adf_pvalue')
+                if adf_p is not None:
+                    is_stat = diag.get('adf_is_stationary', adf_p < 0.05)
+                    st.metric("ADF p-value", f"{adf_p:.4f}",
+                              delta="Stationary" if is_stat else "Non-stationary",
+                              delta_color="normal" if is_stat else "inverse")
+            with col2:
+                lb_p = diag.get('ljung_box_pvalue')
+                if lb_p is not None:
+                    ok = lb_p > 0.05
+                    st.metric("Ljung-Box p-value", f"{lb_p:.4f}",
+                              delta="Residuals OK" if ok else "Autocorrelation present",
+                              delta_color="normal" if ok else "inverse")
+            with col3:
+                dw = diag.get('durbin_watson')
+                if dw is not None:
+                    dw_ok = 1.5 < dw < 2.5
+                    st.metric("Durbin-Watson", f"{dw:.3f}",
+                              delta="No autocorr" if dw_ok else "Possible issue",
+                              delta_color="normal" if dw_ok else "inverse")
+
+        if model_info:
+            with st.expander("🤖 Model Details", expanded=False):
+                st.json(model_info)
+
+        if diag or model_info:
+            st.markdown("---")
 
         # ── Month dummies regression ──────────────────────────────────────────
         st.markdown("### 📅 Seasonality — Month Dummies Regression")

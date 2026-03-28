@@ -1,330 +1,316 @@
-"""
-regression.py
--------------
-Time Series Analysis — Y = Amount (member spend)
-  Dummy var 1: Months (seasonality)
-
-Also computes:
-  - Monthly trend (actual + 3-month forecast)
-  - Moving average
-  - Anomaly detection
-  - Lead-lag correlation (campaign activity → amount)
-
-Usage:
-  python3 regression.py <cleaned_data> <combined_data> [shop_mapping]
-  python3 regression.py       # uses config_Keith.xlsx
-"""
-
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+from scipy import stats
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.seasonal import STL
+from statsmodels.tsa.stattools import adfuller, acf, q_stat
+from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
 
-import os, sys, json
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from scipy import stats
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def safe_float(val):
-    try:
-        f = float(val)
-        return None if (np.isnan(f) or np.isinf(f)) else round(f, 4)
-    except:
-        return None
-
-def to_records(df):
-    if df is None or df.empty: return []
-    return json.loads(df.replace([np.inf, -np.inf], np.nan).to_json(orient='records'))
-
-def month_order(s):
-    return pd.to_datetime(s, format='%b-%Y', errors='coerce')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Time Series: Y = Amount, X = Month dummies
-# ─────────────────────────────────────────────────────────────────────────────
-def analyse_time_series(campaign: pd.DataFrame) -> dict:
+def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> dict:
     """
-    Time series analysis on monthly Amount (member spend).
+    Enhanced time series analysis on monthly Amount (member spend).
     
-    1. Monthly aggregation of Amount
-    2. Month dummies regression (OLS) — which months are significantly higher/lower?
-    3. Trend analysis (linear regression on time index)
-    4. 3-month moving average
-    5. 3-month ahead forecast (Holt-Winters or linear extrapolation)
-    6. Anomaly detection
+    Returns:
+        dict with keys:
+            - monthly_amount, mom_trends, moving_average, actual, anomalies, amount_by_source (existing)
+            - forecast (list of dicts with forecast, lower, upper)
+            - seasonally_adjusted (list of dicts)
+            - diagnostics (dict with ADF, Ljung-Box, etc.)
+            - decomposition (trend, seasonal, residual as records)
+            - model_info (which model used, parameters)
+            - month_dummies_regression (existing or enhanced)
+            - trend (existing)
     """
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-
     result = {}
     MIN_OBS = 6
+    SEASONAL_PERIOD = 12
 
     if 'amount' not in campaign.columns or 'month_year' not in campaign.columns:
         return {'error': 'amount or month_year column missing'}
 
-    # ── Monthly aggregation ───────────────────────────────────────────────
+    # --- data preparation ---
     camp = campaign.copy()
     camp['amount'] = pd.to_numeric(camp['amount'], errors='coerce')
-
     monthly = (camp.groupby('month_year')
-                   .agg(
-                       total_amount  =('amount', 'sum'),
-                       avg_amount    =('amount', 'mean'),
-                       txn_count     =('receipt_no', 'nunique') if 'receipt_no' in camp.columns
-                                      else ('amount', 'count'),
-                       redemptions   =('receipt_no', 'nunique') if 'receipt_no' in camp.columns
-                                      else ('amount', 'count'),
-                   )
+                   .agg(total_amount=('amount', 'sum'),
+                        avg_amount=('amount', 'mean'),
+                        txn_count=('receipt_no', 'nunique') if 'receipt_no' in camp.columns else ('amount', 'count'))
                    .reset_index())
-
-    monthly['sort_key'] = month_order(monthly['month_year'])
+    monthly['sort_key'] = pd.to_datetime(monthly['month_year'], format='%b-%Y', errors='coerce')
     monthly = monthly.sort_values('sort_key').reset_index(drop=True)
-
     if len(monthly) < MIN_OBS:
         return {'error': f"Only {len(monthly)} months of data — need ≥{MIN_OBS}"}
 
     result['monthly_amount'] = to_records(monthly.drop(columns='sort_key'))
-
-    # ── Month dummies regression (OLS) ────────────────────────────────────
-    # Which months are significantly different from the base month?
-    import statsmodels.api as sm
-    from sklearn.preprocessing import StandardScaler
-
-    monthly['_month_num'] = monthly['sort_key'].dt.month
-    month_dummies = pd.get_dummies(monthly['_month_num'], prefix='month', drop_first=True)
-    X = sm.add_constant(month_dummies.astype(float))
-    y = monthly['total_amount'].astype(float)
-
-    if len(y) >= MIN_OBS and X.shape[1] > 1:
-        try:
-            ols = sm.OLS(y, X).fit()
-            coef_df = pd.DataFrame({
-                'month':       ['const'] + [c for c in month_dummies.columns],
-                'coef':        ols.params.values,
-                'p_value':     ols.pvalues.values,
-                'significant': (ols.pvalues.values < 0.05),
-            })
-            result['month_dummies_regression'] = {
-                'coef_table':    to_records(coef_df),
-                'r_squared':     safe_float(ols.rsquared),
-                'adj_r_squared': safe_float(ols.rsquared_adj),
-                'f_pvalue':      safe_float(ols.f_pvalue),
-                'n_obs':         int(ols.nobs),
-                'insight': (
-                    f"Month dummies explain {ols.rsquared*100:.1f}% of variance in monthly spend "
-                    f"(Adj-R²={ols.rsquared_adj:.3f}). "
-                    + ("Significant months: " +
-                       ", ".join(coef_df[coef_df['significant'] & (coef_df['month'] != 'const')]['month'].tolist())
-                       if any(coef_df[coef_df['month'] != 'const']['significant'])
-                       else "No months significantly different from base at p<0.05.")
-                ),
-                'base_month': 'January (month=1)',
-            }
-        except Exception as e:
-            result['month_dummies_regression'] = {'error': str(e)}
-
-    # ── MoM % change ──────────────────────────────────────────────────────
+    # MoM % change etc. as before...
     monthly['mom_pct_change'] = monthly['total_amount'].pct_change().mul(100).round(2)
-    result['mom_trends'] = to_records(monthly[['month_year','total_amount','avg_amount',
-                                                'txn_count','mom_pct_change']].drop(columns=['sort_key'], errors='ignore'))
-
-    # ── Linear trend ──────────────────────────────────────────────────────
+    result['mom_trends'] = to_records(monthly[['month_year','total_amount','avg_amount','txn_count','mom_pct_change']])
+    # linear trend for basic summary
     x_idx = np.arange(len(monthly))
     slope, intercept, r, p, _ = stats.linregress(x_idx, monthly['total_amount'].values)
     result['trend'] = {
-        'slope':      safe_float(slope),
-        'r_squared':  safe_float(r**2),
-        'p_value':    safe_float(p),
-        'direction':  'upward' if slope > 0 else 'downward',
-        'strength':   'strong' if abs(r) > 0.7 else ('moderate' if abs(r) > 0.4 else 'weak'),
+        'slope': safe_float(slope),
+        'r_squared': safe_float(r**2),
+        'p_value': safe_float(p),
+        'direction': 'upward' if slope > 0 else 'downward',
+        'strength': 'strong' if abs(r) > 0.7 else ('moderate' if abs(r) > 0.4 else 'weak'),
         'significant': bool(p < 0.05),
     }
-
-    # ── 3-month moving average ────────────────────────────────────────────
+    # moving average (existing)
     monthly['ma3'] = monthly['total_amount'].rolling(3, min_periods=1).mean().round(2)
     result['moving_average'] = to_records(monthly[['month_year', 'ma3']])
+    result['actual'] = [{'month_year': r['month_year'], 'value': safe_float(r['total_amount'])} for _, r in monthly.iterrows()]
 
-    # ── Actual data points ────────────────────────────────────────────────
-    result['actual'] = [
-        {'month_year': r['month_year'], 'value': safe_float(r['total_amount'])}
-        for _, r in monthly.iterrows()
-    ]
-
-    # ── Forecast (3 months ahead) ─────────────────────────────────────────
+    # --- seasonal decomposition (STL) ---
+    # Use a time series with DatetimeIndex
     series = monthly.set_index('sort_key')['total_amount'].astype(float)
-    series.index = pd.DatetimeIndex(series.index).to_period('M').to_timestamp()
-    forecasts = []
+    series = series.asfreq('MS')  # month start frequency
+    # STL requires at least 2 full seasonal cycles if seasonal is True, else raise
+    if len(series) >= 2 * SEASONAL_PERIOD:
+        try:
+            stl = STL(series, period=SEASONAL_PERIOD, robust=True).fit()
+            seasonal = stl.seasonal
+            trend = stl.trend
+            resid = stl.resid
+            result['decomposition'] = {
+                'trend': to_records(pd.DataFrame({'month_year': series.index.strftime('%b-%Y'), 'value': trend.values})),
+                'seasonal': to_records(pd.DataFrame({'month_year': series.index.strftime('%b-%Y'), 'value': seasonal.values})),
+                'residual': to_records(pd.DataFrame({'month_year': series.index.strftime('%b-%Y'), 'value': resid.values})),
+            }
+            # seasonally adjusted
+            seasonally_adjusted = series - seasonal
+            result['seasonally_adjusted'] = to_records(pd.DataFrame({
+                'month_year': series.index.strftime('%b-%Y'),
+                'value': seasonally_adjusted.values
+            }))
+        except Exception as e:
+            result['decomposition'] = {'error': str(e)}
+    else:
+        result['decomposition'] = {'note': f'Not enough data for STL (need {2*SEASONAL_PERIOD} months)'}
+
+    # --- Month dummies regression (seasonality significance) ---
+    # Same as before, but store for later use if fallback needed
+    month_dummies_result = {}
     try:
-        if len(series) >= 12:
-            mdl = ExponentialSmoothing(series, trend='add', seasonal='add',
-                                       seasonal_periods=12).fit(optimized=True)
-        else:
-            mdl = ExponentialSmoothing(series, trend='add', seasonal=None).fit(optimized=True)
-        pred    = mdl.forecast(3)
-        last_dt = series.index[-1]
-        for i, val in enumerate(pred):
-            fdt = last_dt + pd.DateOffset(months=i+1)
-            forecasts.append({'month_year': fdt.strftime('%b-%Y'),
-                               'forecast': safe_float(val), 'type': 'forecast'})
-    except:
-        # Fallback: linear extrapolation
-        last_val = float(series.iloc[-1])
-        last_dt  = series.index[-1]
-        for i in range(1, 4):
-            fdt = last_dt + pd.DateOffset(months=i)
-            forecasts.append({'month_year': fdt.strftime('%b-%Y'),
-                               'forecast': safe_float(last_val + slope * i),
-                               'type': 'linear_extrapolation'})
+        monthly['_month_num'] = monthly['sort_key'].dt.month
+        month_dummies = pd.get_dummies(monthly['_month_num'], prefix='month', drop_first=True)
+        X = sm.add_constant(month_dummies.astype(float))
+        y = monthly['total_amount'].astype(float)
+        ols = sm.OLS(y, X).fit()
+        coef_df = pd.DataFrame({
+            'month': ['const'] + [c for c in month_dummies.columns],
+            'coef': ols.params.values,
+            'p_value': ols.pvalues.values,
+            'significant': (ols.pvalues.values < 0.05),
+        })
+        month_dummies_result = {
+            'coef_table': to_records(coef_df),
+            'r_squared': safe_float(ols.rsquared),
+            'adj_r_squared': safe_float(ols.rsquared_adj),
+            'f_pvalue': safe_float(ols.f_pvalue),
+            'n_obs': int(ols.nobs),
+            'insight': f"Month dummies explain {ols.rsquared*100:.1f}% of variance...",
+            'base_month': 'January (month=1)',
+        }
+    except Exception as e:
+        month_dummies_result = {'error': str(e)}
+    result['month_dummies_regression'] = month_dummies_result
+
+    # --- Model selection & forecast ---
+    n_months = len(series)
+    use_seasonal_model = n_months >= 12
+
+    # We'll store forecast outputs
+    forecasts = []  # list of dicts: month_year, forecast, lower, upper
+
+    if use_seasonal_model:
+        # Use ExponentialSmoothing (Holt-Winters) with seasonal additive
+        try:
+            # Fit model (trend additive, seasonal additive, period=12)
+            model = ExponentialSmoothing(series, trend='add', seasonal='add',
+                                         seasonal_periods=SEASONAL_PERIOD,
+                                         initialization_method='estimated')
+            fitted = model.fit()
+            # Forecast horizon steps
+            pred = fitted.forecast(forecast_horizon)
+            # Get prediction intervals: use fitted.get_prediction if available (statsmodels >= 0.12)
+            # For older versions, we compute intervals via simulation or using standard errors
+            # Here we use the approach of prediction intervals from the model's residual variance
+            residuals = fitted.resid
+            sigma = np.std(residuals)  # approximate
+            # Confidence level 95%
+            z = stats.norm.ppf(0.975)
+            lower = pred - z * sigma
+            upper = pred + z * sigma
+            # Build forecast list
+            last_date = series.index[-1]
+            for i in range(forecast_horizon):
+                fdt = last_date + pd.DateOffset(months=i+1)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast': safe_float(pred.iloc[i]),
+                    'lower_bound': safe_float(lower.iloc[i]),
+                    'upper_bound': safe_float(upper.iloc[i]),
+                    'type': 'ets_forecast'
+                })
+            result['model_info'] = {
+                'model': 'ExponentialSmoothing (additive trend + additive seasonality)',
+                'params': {k: safe_float(v) for k, v in fitted.params.items() if isinstance(v, (int, float))},
+                'aic': safe_float(fitted.aic),
+                'bic': safe_float(fitted.bic),
+            }
+        except Exception as e:
+            # Fallback to regression
+            use_seasonal_model = False
+            result['model_info'] = {'error': str(e), 'fallback': 'regression'}
+
+    if not use_seasonal_model:
+        # Use linear trend + month dummies regression for forecasting
+        # Build design matrix for all months (including future)
+        # We'll use the same month dummies as before
+        monthly['time'] = np.arange(len(monthly))
+        # Fit OLS: total_amount ~ time + month_dummies
+        X_train = pd.concat([monthly[['time']], month_dummies], axis=1)
+        X_train = sm.add_constant(X_train)
+        y_train = monthly['total_amount'].astype(float)
+        try:
+            reg = sm.OLS(y_train, X_train).fit()
+            # Future time steps (next forecast_horizon months)
+            future_time = np.arange(len(monthly), len(monthly) + forecast_horizon)
+            # Future month dummies: we need month number for each future month
+            last_month_num = monthly['_month_num'].iloc[-1]
+            future_months = []
+            for i in range(forecast_horizon):
+                next_month = (last_month_num + i - 1) % 12 + 1  # wrap around
+                future_months.append(next_month)
+            # Create dummy columns for future
+            month_dummy_cols = month_dummies.columns
+            X_future = pd.DataFrame(index=range(forecast_horizon))
+            X_future['time'] = future_time
+            for col in month_dummy_cols:
+                # col is like "month_2", "month_3", ... ; month number is after underscore
+                month_num = int(col.split('_')[1])
+                X_future[col] = (np.array(future_months) == month_num).astype(int)
+            X_future = sm.add_constant(X_future)
+            # Predict and get prediction intervals (mean + variance)
+            pred_obj = reg.get_prediction(X_future)
+            pred_mean = pred_obj.predicted_mean
+            pred_ci = pred_obj.conf_int(alpha=0.05)  # returns lower, upper
+            # Build forecast list
+            last_date = monthly['sort_key'].iloc[-1]
+            for i in range(forecast_horizon):
+                fdt = last_date + pd.DateOffset(months=i+1)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast': safe_float(pred_mean.iloc[i]),
+                    'lower_bound': safe_float(pred_ci.iloc[i, 0]),
+                    'upper_bound': safe_float(pred_ci.iloc[i, 1]),
+                    'type': 'regression_trend_seasonal'
+                })
+            result['model_info'] = {
+                'model': 'Linear trend + month dummies',
+                'r_squared': safe_float(reg.rsquared),
+                'adj_r_squared': safe_float(reg.rsquared_adj),
+                'f_pvalue': safe_float(reg.f_pvalue),
+            }
+        except Exception as e:
+            # Last resort: simple linear extrapolation
+            result['model_info'] = {'error': str(e), 'fallback': 'linear_extrapolation'}
+            last_val = series.iloc[-1]
+            last_date = series.index[-1]
+            for i in range(forecast_horizon):
+                fdt = last_date + pd.DateOffset(months=i+1)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast': safe_float(last_val + slope * (i+1)),
+                    'lower_bound': None,
+                    'upper_bound': None,
+                    'type': 'linear_extrapolation'
+                })
+
     result['forecast'] = forecasts
 
-    # ── Anomaly detection ─────────────────────────────────────────────────
-    residuals  = monthly['total_amount'] - (intercept + slope * x_idx)
-    std_resid  = residuals.std()
-    mean_resid = residuals.mean()
-    anomalies  = []
-    for i, (_, row) in enumerate(monthly.iterrows()):
-        res = residuals.iloc[i]
-        if abs(res - mean_resid) > 2 * std_resid:
-            anomalies.append({
-                'month_year': row['month_year'],
-                'actual':     safe_float(row['total_amount']),
-                'residual':   safe_float(res),
-                'direction':  'above' if res > mean_resid else 'below',
-            })
-    result['anomalies'] = anomalies
+    # --- Diagnostics ---
+    # ADF test for stationarity
+    adf_result = adfuller(series.dropna(), autolag='AIC')
+    result['diagnostics'] = {
+        'adf_statistic': safe_float(adf_result[0]),
+        'adf_pvalue': safe_float(adf_result[1]),
+        'adf_is_stationary': bool(adf_result[1] < 0.05),
+        'adf_used_lag': adf_result[2],
+    }
+    # Residuals from best model (if we have a model)
+    if 'model_info' in result and 'model' in result['model_info']:
+        if use_seasonal_model and 'fitted' in locals():
+            res = fitted.resid
+            # Ljung-Box test
+            ljung_box = acf(res, nlags=min(20, len(res)-1), qstat=True)
+            lb_stat = ljung_box[1]
+            lb_pvalue = ljung_box[2]
+            result['diagnostics']['ljung_box_stat'] = safe_float(lb_stat[-1])
+            result['diagnostics']['ljung_box_pvalue'] = safe_float(lb_pvalue[-1])
+            result['diagnostics']['residuals_autocorrelation'] = 'significant' if lb_pvalue[-1] < 0.05 else 'not significant'
+        elif 'reg' in locals():
+            res = reg.resid
+            ljung_box = acf(res, nlags=min(20, len(res)-1), qstat=True)
+            lb_stat = ljung_box[1]
+            lb_pvalue = ljung_box[2]
+            result['diagnostics']['ljung_box_stat'] = safe_float(lb_stat[-1])
+            result['diagnostics']['ljung_box_pvalue'] = safe_float(lb_pvalue[-1])
+            result['diagnostics']['residuals_autocorrelation'] = 'significant' if lb_pvalue[-1] < 0.05 else 'not significant'
+    # Durbin-Watson from existing OLS if available
+    if 'month_dummies_regression' in result and 'coef_table' in result['month_dummies_regression']:
+        # compute DW from the OLS model we already ran earlier
+        try:
+            dw = sm.stats.stattools.durbin_watson(ols.resid)
+            result['diagnostics']['durbin_watson'] = safe_float(dw)
+        except:
+            pass
 
-    # ── Campaign type breakdown ───────────────────────────────────────────
+    # --- Anomaly detection (improved using residuals from best model) ---
+    # Use residuals from decomposition if available, else use trend residuals
+    if 'decomposition' in result and 'residual' in result['decomposition']:
+        # residuals from STL
+        resid_series = pd.Series([r['value'] for r in result['decomposition']['residual']])
+        mean_resid = resid_series.mean()
+        std_resid = resid_series.std()
+        anomalies = []
+        for i, row in monthly.iterrows():
+            res = resid_series.iloc[i]
+            if abs(res - mean_resid) > 2 * std_resid:
+                anomalies.append({
+                    'month_year': row['month_year'],
+                    'actual': safe_float(row['total_amount']),
+                    'residual': safe_float(res),
+                    'direction': 'above' if res > mean_resid else 'below',
+                })
+        result['anomalies'] = anomalies
+    else:
+        # fallback: linear trend residuals
+        residuals = monthly['total_amount'] - (intercept + slope * x_idx)
+        std_resid = residuals.std()
+        mean_resid = residuals.mean()
+        anomalies = []
+        for i, row in monthly.iterrows():
+            res = residuals.iloc[i]
+            if abs(res - mean_resid) > 2 * std_resid:
+                anomalies.append({
+                    'month_year': row['month_year'],
+                    'actual': safe_float(row['total_amount']),
+                    'residual': safe_float(res),
+                    'direction': 'above' if res > mean_resid else 'below',
+                })
+        result['anomalies'] = anomalies
+
+    # --- Campaign source breakdown (existing) ---
     if 'campaign_source' in campaign.columns:
         by_source = (camp.groupby(['month_year', 'campaign_source'])['amount']
                          .sum().reset_index())
-        by_source['sort_key'] = month_order(by_source['month_year'])
+        by_source['sort_key'] = pd.to_datetime(by_source['month_year'], format='%b-%Y', errors='coerce')
         by_source = by_source.sort_values('sort_key').drop(columns='sort_key')
         result['amount_by_source'] = to_records(by_source)
 
     return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ROI summary (campaign cost vs GTO rent)
-# ─────────────────────────────────────────────────────────────────────────────
-def analyse_roi(campaign: pd.DataFrame, gto: pd.DataFrame) -> dict:
-    """Simple ROI: total_amount redeemed vs GTO rent per month."""
-    result = {}
-
-    if 'month_year' not in campaign.columns or 'month_year' not in gto.columns:
-        return result
-
-    camp_monthly = (campaign.groupby('month_year')
-                            .agg(total_amount=('amount', 'sum'),
-                                 redemptions=('receipt_no', 'nunique')
-                                 if 'receipt_no' in campaign.columns
-                                 else ('amount', 'count'))
-                            .reset_index())
-
-    gto_monthly = (gto.groupby('month_year')['gto_rent']
-                      .sum().reset_index()
-                      .rename(columns={'gto_rent': 'total_gto_rent'}))
-
-    merged = pd.merge(camp_monthly, gto_monthly, on='month_year', how='outer').fillna(0)
-    merged['sort_key'] = month_order(merged['month_year'])
-    merged = merged.sort_values('sort_key').drop(columns='sort_key').reset_index(drop=True)
-
-    result['monthly_roi'] = to_records(merged)
-
-    valid = merged[merged['total_amount'] > 0]
-    if not valid.empty:
-        result['summary'] = {
-            'total_amount_redeemed': safe_float(merged['total_amount'].sum()),
-            'total_gto_rent':        safe_float(merged['total_gto_rent'].sum()),
-            'avg_monthly_amount':    safe_float(merged['total_amount'].mean()),
-            'avg_monthly_gto_rent':  safe_float(merged['total_gto_rent'].mean()),
-        }
-
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
-def main(cleaned_folder: str, combined_folder: str, mapping_file: str = ''):
-    print("\n" + "="*60)
-    print("TIME SERIES & ROI ANALYSIS STARTING")
-    print("="*60)
-
-    camp_path = os.path.join(cleaned_folder, 'campaign_all.csv')
-    if not os.path.exists(camp_path):
-        print(f"❌ campaign_all.csv not found: {camp_path}")
-        sys.exit(1)
-
-    campaign = pd.read_csv(camp_path)
-    campaign['amount'] = pd.to_numeric(campaign.get('amount', pd.Series()), errors='coerce')
-    print(f"  Campaign: {len(campaign):,} rows")
-
-    # GTO rent
-    gto = pd.DataFrame()
-    for f in os.listdir(cleaned_folder):
-        if 'gto_monthly_rent' in f.lower() and f.endswith(('.xlsx', '.csv')):
-            path = os.path.join(cleaned_folder, f)
-            gto  = pd.read_excel(path) if path.endswith('.xlsx') else pd.read_csv(path)
-            break
-    if not gto.empty:
-        print(f"  GTO rent: {len(gto):,} rows")
-
-    # Run analyses
-    ts_result  = analyse_time_series(campaign)
-    roi_result = analyse_roi(campaign, gto) if not gto.empty else {}
-
-    # Save insights.json
-    insights = {
-        'time_series': ts_result,
-        'roi':         roi_result,
-    }
-    os.makedirs(combined_folder, exist_ok=True)
-    json_path = os.path.join(combined_folder, 'insights.json')
-    with open(json_path, 'w') as f:
-        json.dump(insights, f, indent=2, default=str)
-    print(f"\n✅ Saved: {json_path}")
-
-    # Save Excel report
-    report_path = os.path.join(combined_folder, 'insights_report.xlsx')
-    with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
-        sheets = [
-            ('Monthly_Amount',    ts_result.get('monthly_amount')),
-            ('Month_Regression',  ts_result.get('month_dummies_regression', {}).get('coef_table')),
-            ('MoM_Trends',        ts_result.get('mom_trends')),
-            ('Forecast',          ts_result.get('forecast')),
-            ('Anomalies',         ts_result.get('anomalies')),
-            ('Amount_by_Source',  ts_result.get('amount_by_source')),
-            ('ROI_Monthly',       roi_result.get('monthly_roi')),
-        ]
-        for sheet_name, records in sheets:
-            if records:
-                pd.DataFrame(records).to_excel(writer, sheet_name=sheet_name, index=False)
-    print(f"✅ Saved: {report_path}")
-
-    # Print summary
-    trend = ts_result.get('trend', {})
-    print(f"\n  Trend: {trend.get('direction','—')} ({trend.get('strength','—')}), "
-          f"R²={trend.get('r_squared','—')}, p={trend.get('p_value','—')}")
-    if 'month_dummies_regression' in ts_result:
-        mdr = ts_result['month_dummies_regression']
-        if 'insight' in mdr:
-            print(f"  Month seasonality: {mdr['insight']}")
-
-    print("\n" + "="*60)
-    print("✅ REGRESSION (TIME SERIES) COMPLETED")
-    print("="*60)
-
-
-if __name__ == "__main__":
-    if len(sys.argv) >= 3:
-        main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else '')
-    else:
-        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
-        script_dir  = Path(__file__).resolve().parent
-        df          = pd.read_excel(script_dir / config_file, sheet_name='paths')
-        cfg         = dict(zip(df['Setting'].astype(str).str.strip(), df['Value'].astype(str).str.strip()))
-        main(cfg.get('cleaned_data',''), cfg.get('combined_data',''), cfg.get('shop_mapping',''))
