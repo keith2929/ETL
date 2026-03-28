@@ -189,7 +189,7 @@ def regression_1(campaign: pd.DataFrame) -> dict:
                         vdummies.reset_index(drop=True)], axis=1)
 
     camp_cols = [c for c in df_reg.columns if c.startswith('camp_')]
-    features  = ['is_brand'] + camp_cols
+    features  = camp_cols
     features  = [f for f in features if pd.api.types.is_numeric_dtype(df_reg[f])]
 
     print(f"    Features: 1 control + {len(camp_cols)} campaign dummies = {len(features)} total")
@@ -198,8 +198,7 @@ def regression_1(campaign: pd.DataFrame) -> dict:
                      label='Regression 1: Y=Amount (per receipt, by campaign)')
     result['n_rows'] = len(df_reg)
     result['feature_groups'] = {
-        'control':  ['is_brand'],
-        'campaign': camp_cols,
+    'campaign': camp_cols,
     }
 
     # ── Campaign summary table  ─────────────────────────────────────
