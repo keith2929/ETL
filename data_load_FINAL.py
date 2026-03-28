@@ -154,6 +154,14 @@ def load_and_merge(raw_folder: str) -> pd.DataFrame:
     )]
     removed = before - len(merged)
     print(f"   Removed {removed} rows with insignificant voucher values (min40-7, min300-25)")
+
+    # ── Drop zero-amount transactions ─────────────────────────────────────
+    before_zero = len(merged)
+    merged = merged[~(merged['amount'].notna() & (merged['amount'] == 0))]
+    removed_zero = before_zero - len(merged)
+    if removed_zero:
+        print(f"   Removed {removed_zero} rows with amount = 0")
+
     print(f"   Merged: {matched:,}/{len(merged):,} rows matched on receipt_no")
 
     # ── Summary stats ─────────────────────────────────────────────────────
