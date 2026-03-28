@@ -188,36 +188,36 @@ def one_sample_ttest(campaign: pd.DataFrame) -> list:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. ROI per campaign
-# ROI = total_amount / total_voucher_value
+# ROI = avg_amount_per_transaction / voucher_value
 # ─────────────────────────────────────────────────────────────────────────────
 def roi_analysis(campaign: pd.DataFrame) -> list:
     """
-    ROI = total transaction amount generated / total voucher value redeemed.
-    ROI > 1 means the campaign generated more revenue than its cost.
+    ROI = avg_amount_per_transaction / voucher_value (median)
+    ROI > 1 means avg transaction revenue exceeds voucher cost.
     """
     results = []
 
     for code, grp in campaign.groupby('voucher_code'):
-        source      = grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else ''
-        n           = grp['amount'].notna().sum()
-        total_amt   = grp['amount'].sum()
-        avg_amt     = grp['amount'].mean()
+        source    = grp['campaign_source'].iloc[0] if 'campaign_source' in grp.columns else ''
+        n         = int(grp['amount'].notna().sum())
+        total_amt = grp['amount'].sum()
+        avg_amt   = total_amt / n if n > 0 else 0
 
-        # Voucher value
-        total_voucher = None
+        # Voucher value — median as representative value
+        single_voucher_val = None
         if 'voucher_value' in grp.columns:
-            vv = pd.to_numeric(grp['voucher_value'], errors='coerce')
-            total_voucher = vv.sum() if vv.notna().any() else None
+            vv = pd.to_numeric(grp['voucher_value'], errors='coerce').dropna()
+            single_voucher_val = float(vv.median()) if not vv.empty else None
 
-        roi = safe_float(total_amt / total_voucher) if total_voucher and total_voucher > 0 else None
+        roi = safe_float(avg_amt / single_voucher_val) if single_voucher_val and single_voucher_val > 0 else None
 
         results.append({
             'voucher_code':    code,
             'campaign_source': source,
-            'n_redemptions':   int(n),
+            'n_redemptions':   n,
             'total_revenue':   safe_float(total_amt),
             'avg_revenue':     safe_float(avg_amt),
-            'total_voucher_cost': safe_float(total_voucher),
+            'voucher_value':   safe_float(single_voucher_val),
             'roi':             roi,
             'roi_label':       (
                 '✅ Positive ROI' if roi and roi > 1
@@ -226,10 +226,8 @@ def roi_analysis(campaign: pd.DataFrame) -> list:
             ),
         })
 
-    # Sort by ROI descending
     results.sort(key=lambda x: x.get('roi') or 0, reverse=True)
     return results
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary stats
