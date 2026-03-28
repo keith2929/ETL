@@ -619,7 +619,7 @@ with tab_tt:
 
         # ── Normality ─────────────────────────────────────────────────────
         st.markdown("### 📐 Normality Test (Shapiro-Wilk)")
-        st.caption("H₀: Revenue distribution is normal. p≥0.05 = normal distribution.")
+        st.caption("n>30: Normal by Central Limit Theorem. n≤30: Shapiro-Wilk test (p≥0.05 = normal).")
 
         if normality:
             df_norm = pd.DataFrame(normality)
