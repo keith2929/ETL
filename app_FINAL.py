@@ -399,8 +399,8 @@ if filt_months: active_parts.append(f"Months: {', '.join(filt_months)}")
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tabs
 # ═══════════════════════════════════════════════════════════════════════════════
-tab_run, tab_config, tab_ts, tab_reg = st.tabs([
-    "▶  RUN", "⚙  CONFIG", "📈  TIME SERIES", "📉  REGRESSION"
+tab_run, tab_config, tab_ts, tab_reg, tab_tt = st.tabs([
+    "▶  RUN", "⚙  CONFIG", "📈  TIME SERIES", "📉  REGRESSION", "🧪  T-TEST & ROI"
 ])
 
 
@@ -446,7 +446,171 @@ with tab_run:
             args=(st.session_state.run_config, q),
             daemon=True,
         ).start()
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — T-TEST & ROI
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_tt:
+    tt_path = Path(_combined_path) / 'ttest_results.json' if _combined_path else Path('')
 
+    if not tt_path.exists():
+        st.info("No T-Test results yet — run the pipeline first.")
+    else:
+        with open(tt_path) as f:
+            tt_data = json.load(f).get('ttest_analysis', {})
+
+        summ      = tt_data.get('summary', {})
+        ttest     = tt_data.get('ttest', [])
+        roi       = tt_data.get('roi', [])
+        normality = tt_data.get('normality', [])
+
+        # ── Summary metrics ───────────────────────────────────────────────
+        st.markdown("### 📊 Overview")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Overall Mean Revenue",  f"${summ.get('overall_mean_revenue') or 0:,.0f}")
+        c2.metric("Total Campaigns",        summ.get('n_campaigns', '—'))
+        c3.metric("Mall Campaigns",         summ.get('n_mall_campaigns', '—'))
+        c4.metric("Brand Campaigns",        summ.get('n_brand_campaigns', '—'))
+
+        st.markdown("---")
+
+        # ── One-sample T-test ─────────────────────────────────────────────
+        st.markdown("### 🧪 One-Sample T-Test")
+        st.caption(f"H₀: Campaign mean revenue = Overall mean (${summ.get('overall_mean_revenue') or 0:,.0f}). Highlighted = significant at p<0.05.")
+
+        if ttest:
+            df_tt = pd.DataFrame(ttest)
+
+            sig_above = df_tt[(df_tt['significant']==True) & (df_tt['direction']=='above')]
+            sig_below = df_tt[(df_tt['significant']==True) & (df_tt['direction']=='below')]
+
+            ca, cb = st.columns(2)
+            ca.metric("Significantly Above Mean", len(sig_above), delta="↑ higher spend")
+            cb.metric("Significantly Below Mean", len(sig_below), delta="↓ lower spend", delta_color="inverse")
+
+            disp_cols = [c for c in ['voucher_code','campaign_source','n',
+                                     'campaign_mean','overall_mean','diff_from_mean',
+                                     't_stat','p_value','significant','direction']
+                         if c in df_tt.columns]
+
+            def _hl_tt(row):
+                if row.get('significant') and row.get('direction') == 'above':
+                    return ['background-color:#1a2e1a; color:#4af0c4'] * len(row)
+                elif row.get('significant') and row.get('direction') == 'below':
+                    return ['background-color:#2e1a1a; color:#ff5c5c'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(
+                df_tt[disp_cols].style.apply(_hl_tt, axis=1),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    'voucher_code':    st.column_config.TextColumn('Campaign'),
+                    'campaign_source': st.column_config.TextColumn('Source'),
+                    'n':               st.column_config.NumberColumn('N', format='%d'),
+                    'campaign_mean':   st.column_config.NumberColumn('Campaign Mean ($)', format='$%.0f'),
+                    'overall_mean':    st.column_config.NumberColumn('Overall Mean ($)', format='$%.0f'),
+                    'diff_from_mean':  st.column_config.NumberColumn('Diff ($)', format='$%.0f'),
+                    't_stat':          st.column_config.NumberColumn('T-stat', format='%.3f'),
+                    'p_value':         st.column_config.NumberColumn('P-value', format='%.4f'),
+                }
+            )
+            st.caption("🟢 Green = significantly above mean | 🔴 Red = significantly below mean")
+
+        st.markdown("---")
+
+        # ── ROI ───────────────────────────────────────────────────────────
+        st.markdown("### 💰 ROI per Campaign")
+        st.caption("ROI = Total Revenue / Total Voucher Cost. ROI > 1 = positive return.")
+
+        if roi:
+            df_roi = pd.DataFrame(roi)
+
+            # Top 10 ROI bar chart
+            df_roi_valid = df_roi[df_roi['roi'].notna()].copy()
+            if not df_roi_valid.empty:
+            top10_roi = df_roi_valid.head(10).copy()
+            st.markdown("**Top 10 Campaigns by ROI**")
+            top10_roi_chart = pd.DataFrame(index=top10_roi['voucher_code'])
+            top10_roi_chart['Mall']  = top10_roi.set_index('voucher_code')['roi'].where(
+                top10_roi.set_index('voucher_code')['campaign_source'] == 'mall')
+            top10_roi_chart['Brand'] = top10_roi.set_index('voucher_code')['roi'].where(
+                top10_roi.set_index('voucher_code')['campaign_source'] == 'brand')
+            st.bar_chart(top10_roi_chart, color=['#ff5c5c', '#4af0c4'])
+
+            def _hl_roi(row):
+                r = row.get('roi')
+                if r and r > 1:   return ['background-color:#1a2e1a; color:#4af0c4'] * len(row)
+                if r and r < 1:   return ['background-color:#2e1a1a; color:#ff5c5c'] * len(row)
+                return [''] * len(row)
+
+            disp_roi = [c for c in ['voucher_code','campaign_source','n_redemptions',
+                                     'total_revenue','avg_revenue',
+                                     'total_voucher_cost','roi','roi_label']
+                        if c in df_roi.columns]
+            st.dataframe(
+                df_roi[disp_roi].style.apply(_hl_roi, axis=1),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    'voucher_code':       st.column_config.TextColumn('Campaign'),
+                    'campaign_source':    st.column_config.TextColumn('Source'),
+                    'n_redemptions':      st.column_config.NumberColumn('Redemptions', format='%d'),
+                    'total_revenue':      st.column_config.NumberColumn('Total Revenue ($)', format='$%.0f'),
+                    'avg_revenue':        st.column_config.NumberColumn('Avg Revenue ($)', format='$%.0f'),
+                    'total_voucher_cost': st.column_config.NumberColumn('Voucher Cost ($)', format='$%.0f'),
+                    'roi':                st.column_config.NumberColumn('ROI', format='%.2fx'),
+                }
+            )
+            st.caption("🟢 Green = ROI > 1 | 🔴 Red = ROI < 1")
+
+        st.markdown("---")
+
+        # ── Normality ─────────────────────────────────────────────────────
+        st.markdown("### 📐 Normality Test (Shapiro-Wilk)")
+        st.caption("H₀: Revenue distribution is normal. p≥0.05 = normal distribution.")
+
+        if normality:
+            df_norm = pd.DataFrame(normality)
+            n_normal     = df_norm['normal'].sum() if 'normal' in df_norm.columns else 0
+            n_not_normal = (~df_norm['normal'].fillna(False)).sum()
+
+            cn1, cn2 = st.columns(2)
+            cn1.metric("Normal Distribution",     int(n_normal))
+            cn2.metric("Not Normal Distribution", int(n_not_normal))
+
+            def _hl_norm(row):
+                if row.get('normal') == True:  return ['background-color:#1a2e1a; color:#4af0c4'] * len(row)
+                if row.get('normal') == False: return ['background-color:#2e1a1a; color:#ff5c5c'] * len(row)
+                return [''] * len(row)
+
+            disp_norm = [c for c in ['voucher_code','campaign_source','n',
+                                      'mean','std','shapiro_stat','shapiro_p','normal','note']
+                         if c in df_norm.columns]
+            st.dataframe(
+                df_norm[disp_norm].style.apply(_hl_norm, axis=1),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    'voucher_code':    st.column_config.TextColumn('Campaign'),
+                    'campaign_source': st.column_config.TextColumn('Source'),
+                    'n':               st.column_config.NumberColumn('N', format='%d'),
+                    'mean':            st.column_config.NumberColumn('Mean ($)', format='$%.0f'),
+                    'std':             st.column_config.NumberColumn('Std ($)', format='$%.0f'),
+                    'shapiro_stat':    st.column_config.NumberColumn('Shapiro W', format='%.4f'),
+                    'shapiro_p':       st.column_config.NumberColumn('P-value', format='%.4f'),
+                }
+            )
+            st.caption("🟢 Green = normal | 🔴 Red = not normal")
+
+        # ── Download ──────────────────────────────────────────────────────
+        st.markdown("---")
+        tt_xlsx = Path(_combined_path) / 'ttest_results.xlsx' if _combined_path else Path('')
+        if tt_xlsx.exists():
+            with open(tt_xlsx, 'rb') as fh:
+                st.download_button(
+                    "⬇️  Download T-Test & ROI Report (.xlsx)",
+                    data=fh.read(),
+                    file_name='ttest_results.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    type='primary',
+                )
     # ── Drain the queue (non-blocking) ────────────────────────────────────────
     if st.session_state.running and st.session_state.log_queue is not None:
         q = st.session_state.log_queue
