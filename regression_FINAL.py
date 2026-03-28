@@ -163,7 +163,7 @@ def analyse_time_series(campaign: pd.DataFrame) -> dict:
                                        seasonal_periods=12).fit(optimized=True)
         else:
             mdl = ExponentialSmoothing(series, trend='add', seasonal=None).fit(optimized=True)
-        pred    = mdl.forecast(3)
+        pred    = mdl.forecast(24)
         last_dt = series.index[-1]
         for i, val in enumerate(pred):
             fdt = last_dt + pd.DateOffset(months=i+1)
@@ -173,7 +173,7 @@ def analyse_time_series(campaign: pd.DataFrame) -> dict:
         # Fallback: linear extrapolation
         last_val = float(series.iloc[-1])
         last_dt  = series.index[-1]
-        for i in range(1, 4):
+        for i in range(1, 25):
             fdt = last_dt + pd.DateOffset(months=i)
             forecasts.append({'month_year': fdt.strftime('%b-%Y'),
                                'forecast': safe_float(last_val + slope * i),
