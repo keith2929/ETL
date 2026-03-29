@@ -94,7 +94,7 @@ def read_ts_json(combined_path: str):
         return None
     try:
         with open(p) as f:
-            return json.load(f).get('time_series', {})
+            return json.load(f)
     except Exception:
         return None
 
@@ -568,8 +568,13 @@ with tab_tt:
             st.info("No T-Test results yet — run the pipeline first.")
             tt_data = {}
         else:
-            with open(tt_path) as f:
-                tt_data = json.load(f).get('ttest_analysis', {})
+            try:
+                with open(tt_path) as f:
+                    content = f.read().strip()
+                    tt_data = json.loads(content).get('ttest_analysis', {}) if content else {}
+            except (json.JSONDecodeError, Exception):
+                st.warning("T-Test results file is corrupted — please re-run the pipeline.")
+                tt_data = {}
 
     if tt_data:
         if tt_filters_active and tt_active_parts:
@@ -906,11 +911,17 @@ with tab_ts:
 
     if ts_filters_active:
         with st.spinner("Running time series on filtered data…"):
-            ts = get_ts_filtered(_cleaned_path, ts_filt_source, ts_filt_outlet, ts_filt_months, ts_filt_campaign)
+            ts  = get_ts_filtered(_cleaned_path, ts_filt_source, ts_filt_outlet, ts_filt_months, ts_filt_campaign)
+        mnm = {}
     else:
-        ts = read_ts_json(_combined_path)
+        ins = read_ts_json(_combined_path)
+        if not ins:
+            st.info("No time series results yet — run the pipeline first.")
+            st.stop()
+        ts  = ins.get('time_series', {})
+        mnm = ins.get('member_nonmember', {})
 
-    if ts is None:
+    if not ts:
         st.info("No time series results yet — run the pipeline first.")
     elif ts.get('error'):
         st.warning(ts['error'])
@@ -959,7 +970,12 @@ with tab_ts:
 
             fig.update_layout(
                 xaxis_title='Month', yaxis_title='Amount',
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                legend=dict(
+                    orientation='h',
+                    yanchor='bottom', y=1.02,
+                    xanchor='right', x=1,
+                    font=dict(color='#e8eaf0', size=12),  # bright white text
+                ),
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(22,24,28,1)',
                 font=dict(color='#e8eaf0'),
                 xaxis=dict(gridcolor='#2a2d35'), yaxis=dict(gridcolor='#2a2d35')
@@ -1120,6 +1136,115 @@ with tab_ts:
                     st.dataframe(df_src, use_container_width=True, hide_index=True)
 
         st.markdown("---")
+        # ── Member vs Non-Member Sales ────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 👥 Member vs Non-Member Sales")
+        st.caption("Member Sales = campaign redemption revenue. "
+                   "Non-Member Sales = GTO Amount − Member Sales.")
+
+        if not mnm:
+            st.info("No Member/Non-Member data — re-run the pipeline with GTO file.")
+        else:
+            ms  = mnm.get('member_sales', {})
+            nms = mnm.get('non_member_sales', {})
+
+            if ms.get('actual') or nms.get('actual'):
+                # ── Build combined actual dataframe ───────────────────────
+                frames = []
+                if ms.get('actual'):
+                    df_ms = pd.DataFrame(ms['actual']).rename(
+                        columns={'value': 'Member Sales (Actual)'})
+                    frames.append(df_ms.set_index('month_year'))
+
+                if nms.get('actual'):
+                    df_nms = pd.DataFrame(nms['actual']).rename(
+                        columns={'value': 'Non-Member Sales (Actual)'})
+                    frames.append(df_nms.set_index('month_year'))
+
+                # ── Build combined forecast dataframe ─────────────────────
+                fore_frames = []
+                if ms.get('forecast'):
+                    df_ms_fore = pd.DataFrame(ms['forecast']).rename(
+                        columns={'forecast': 'Member Sales (Forecast)'})
+                    if 'month_year' in df_ms_fore.columns:
+                        fore_frames.append(df_ms_fore.set_index('month_year')[['Member Sales (Forecast)']])
+
+                if nms.get('forecast'):
+                    df_nms_fore = pd.DataFrame(nms['forecast']).rename(
+                        columns={'forecast': 'Non-Member Sales (Forecast)'})
+                    if 'month_year' in df_nms_fore.columns:
+                        fore_frames.append(df_nms_fore.set_index('month_year')[['Non-Member Sales (Forecast)']])
+
+                # ── Combine all into one chart ────────────────────────────
+                all_frames = frames + fore_frames
+                if all_frames:
+                    df_combined = pd.concat(all_frames, axis=1)
+
+                    # Sort index chronologically
+                    df_combined.index = pd.to_datetime(
+                        df_combined.index, format='%b-%Y', errors='coerce')
+                    df_combined = df_combined[df_combined.index.year > 2000]  # remove invalid dates
+                    df_combined = df_combined.sort_index()
+                    df_combined.index = df_combined.index.strftime('%b-%Y')
+
+                    fig_mnm = go.Figure()
+
+                    colors = {
+                        'Member Sales (Actual)':          '#4af0c4',
+                        'Non-Member Sales (Actual)':      '#ff5c5c',
+                        'Member Sales (Forecast)':        '#c8f135',
+                        'Non-Member Sales (Forecast)':    '#fbbf24',
+                    }
+
+                    for col in df_combined.columns:
+                        is_forecast = 'Forecast' in col
+                        fig_mnm.add_trace(go.Scatter(
+                            x=df_combined.index,
+                            y=df_combined[col],
+                            mode='lines+markers',
+                            name=col,
+                            line=dict(
+                                color=colors.get(col, '#ffffff'),
+                                dash='dash' if is_forecast else 'solid',
+                                width=2,
+                            ),
+                            marker=dict(size=5),
+                        ))
+
+                    fig_mnm.update_layout(
+                        xaxis_title='Month',
+                        yaxis_title='Amount ($)',
+                        legend=dict(
+                            orientation='h',
+                            yanchor='bottom', y=1.02,
+                            xanchor='right', x=1,
+                            font=dict(color='#e8eaf0', size=12),  # bright legend text
+                        ),
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(22,24,28,1)',
+                        font=dict(color='#e8eaf0'),
+                        xaxis=dict(gridcolor='#2a2d35'),
+                        yaxis=dict(gridcolor='#2a2d35'),
+                    )
+                    st.plotly_chart(fig_mnm, use_container_width=True)
+                    st.caption("Solid lines = actual data | Dashed lines = forecast. "
+                               "🟢 Member Sales | 🔴 Non-Member Sales")
+                    st.markdown("**Monthly Breakdown**")
+                    df_table = df_combined.copy()
+                    df_table.index.name = 'Month'
+
+                    # Format numbers
+                    st.dataframe(
+                        df_table.style.format("${:,.0f}", na_rep="—"),
+                        use_container_width=True,
+                        column_config={
+                            'Member Sales (Actual)':       st.column_config.NumberColumn('Member Sales Actual ($)',       format='$%.0f'),
+                            'Non-Member Sales (Actual)':   st.column_config.NumberColumn('Non-Member Sales Actual ($)',   format='$%.0f'),
+                            'Member Sales (Forecast)':     st.column_config.NumberColumn('Member Sales Forecast ($)',     format='$%.0f'),
+                            'Non-Member Sales (Forecast)': st.column_config.NumberColumn('Non-Member Sales Forecast ($)', format='$%.0f'),
+                        }
+                    )
+
 
         # ── Anomalies ─────────────────────────────────────────────────────────
         anomalies = ts.get('anomalies', [])
