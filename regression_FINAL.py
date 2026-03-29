@@ -314,3 +314,246 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
         result['amount_by_source'] = to_records(by_source)
 
     return result
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper functions
+# ─────────────────────────────────────────────────────────────────────────────
+def safe_float(val):
+    try:
+        f = float(val)
+        return None if (np.isnan(f) or np.isinf(f)) else round(f, 4)
+    except:
+        return None
+
+def to_records(df):
+    if df is None or df.empty: return []
+    import json
+    return json.loads(df.replace([np.inf, -np.inf], np.nan).to_json(orient='records'))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Load GTO file
+# ─────────────────────────────────────────────────────────────────────────────
+def load_gto(raw_folder: str) -> pd.DataFrame:
+    import os
+    for f in os.listdir(raw_folder):
+        if f.startswith('~$'):
+            continue
+        if 'gto' in f.lower() and 'lease' in f.lower() and f.endswith('.xlsx'):
+            path = os.path.join(raw_folder, f)
+            df   = pd.read_excel(path, header=7)
+            df.columns = df.columns.str.strip()
+            df = df.dropna(how='all').reset_index(drop=True)
+            df['shop_name']  = df['Shop Name'].astype(str).str.strip().str.lower()
+            df['gto_amount'] = pd.to_numeric(df['GTO Amount ($)'], errors='coerce')
+            df['month_year'] = pd.to_datetime(
+                df['GTO Reporting Month'], errors='coerce'
+            ).dt.strftime('%b-%Y')
+            print(f"  GTO loaded: {len(df):,} rows from {f}")
+            return df[['shop_name', 'month_year', 'gto_amount']].dropna()
+    print("  WARNING: GTO file not found")
+    return pd.DataFrame()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Member Sales and Non-Member Sales monthly series
+# ─────────────────────────────────────────────────────────────────────────────
+def build_member_nonmember(campaign: pd.DataFrame, gto: pd.DataFrame) -> dict:
+    """
+    Member Sales   = campaign amount aggregated by outlet × month
+    Non-Member Sales = GTO Amount - Member Sales (outlet × month), clipped at 0
+    Returns monthly totals for both.
+    """
+    campaign = campaign.copy()
+    campaign['outlet_lower'] = campaign['outlet_name'].astype(str).str.strip().str.lower()
+    campaign['amount']       = pd.to_numeric(campaign['amount'], errors='coerce')
+
+    # Member Sales: sum amount by outlet × month
+    member = (campaign.groupby(['outlet_lower', 'month_year'])['amount']
+                      .sum().reset_index()
+                      .rename(columns={'amount': 'member_sales'}))
+
+    # GTO: already shop_name × month_year × gto_amount
+    gto_grp = (gto.groupby(['shop_name', 'month_year'])['gto_amount']
+                   .sum().reset_index())
+
+    # Merge on outlet_lower == shop_name
+    merged = pd.merge(
+        gto_grp, member,
+        left_on=['shop_name', 'month_year'],
+        right_on=['outlet_lower', 'month_year'],
+        how='left'
+    )
+    merged['member_sales']     = merged['member_sales'].fillna(0)
+    merged['non_member_sales'] = (merged['gto_amount'] - merged['member_sales']).clip(lower=0)
+
+    # Monthly totals
+    def monthly_total(df, col):
+        grp = (df.groupby('month_year')[col]
+                .sum().reset_index())
+        grp['sort_key'] = pd.to_datetime(grp['month_year'], format='%b-%Y', errors='coerce')
+        grp = grp[grp['sort_key'].dt.year > 2000]  # remove invalid dates
+        grp = grp.sort_values('sort_key').drop(columns='sort_key')
+        return grp
+
+    member_monthly     = monthly_total(merged, 'member_sales')
+    nonmember_monthly  = monthly_total(merged, 'non_member_sales')
+
+    return {
+        'member_monthly':    member_monthly,
+        'nonmember_monthly': nonmember_monthly,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Simple 24-month forecast for a monthly series
+# ─────────────────────────────────────────────────────────────────────────────
+def forecast_monthly(series_df: pd.DataFrame, value_col: str, n_forecast: int = 24) -> list:
+    from scipy import stats as sp_stats
+    s = series_df.set_index('month_year')[value_col].astype(float)
+    s.index = pd.to_datetime(s.index, format='%b-%Y', errors='coerce')
+    s = s.sort_index().asfreq('MS')
+    forecasts = []
+    last_dt = s.index[-1]
+    try:
+        if len(s) >= 12:
+            mdl = ExponentialSmoothing(s, trend='add', seasonal='add',
+                                       seasonal_periods=12,
+                                       initialization_method='estimated').fit()
+        else:
+            mdl = ExponentialSmoothing(s, trend='add', seasonal=None,
+                                       initialization_method='estimated').fit()
+        pred = mdl.forecast(n_forecast)
+        for i, val in enumerate(pred):
+            fdt = last_dt + pd.DateOffset(months=i+1)
+            forecasts.append({
+                'month_year': fdt.strftime('%b-%Y'),
+                'forecast':   safe_float(val),
+                'type':       'holt_winters'
+            })
+    except Exception as e:
+        print(f"  WARNING: Holt-Winters failed ({e}), using linear extrapolation")
+        s_clean = s.dropna()
+        if len(s_clean) >= 2:
+            x = np.arange(len(s_clean))
+            slope, intercept, *_ = sp_stats.linregress(x, s_clean.values)
+            last_dt = s_clean.index[-1]
+            for i in range(1, n_forecast + 1):
+                fdt = last_dt + pd.DateOffset(months=i)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast':   safe_float(intercept + slope * (len(s_clean) + i)),
+                    'type':       'linear_extrapolation'
+                })
+        else:
+            for i in range(1, n_forecast + 1):
+                fdt = last_dt + pd.DateOffset(months=i)
+                forecasts.append({
+                    'month_year': fdt.strftime('%b-%Y'),
+                    'forecast':   None,
+                    'type':       'insufficient_data'
+                })
+    return forecasts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+def main(cleaned_folder: str, combined_folder: str, raw_folder: str = ''):
+    import os, sys, json
+    from pathlib import Path
+
+    print("\n" + "="*60)
+    print("TIME SERIES & MEMBER/NON-MEMBER ANALYSIS STARTING")
+    print("="*60)
+
+    camp_path = os.path.join(cleaned_folder, 'campaign_all.csv')
+    if not os.path.exists(camp_path):
+        print(f"ERROR campaign_all.csv not found: {camp_path}")
+        sys.exit(1)
+
+    campaign = pd.read_csv(camp_path)
+    campaign['amount'] = pd.to_numeric(campaign.get('amount', pd.Series()), errors='coerce')
+    print(f"  Campaign: {len(campaign):,} rows")
+
+    # ── Time Series (existing) ────────────────────────────────────────────
+    ts_result = analyse_time_series(campaign)
+
+    # ── Member / Non-Member Sales ─────────────────────────────────────────
+    member_nonmember = {}
+    if raw_folder and os.path.exists(raw_folder):
+        print("\n  Loading GTO file...")
+        gto = load_gto(raw_folder)
+        if not gto.empty:
+            print("  Building Member / Non-Member Sales series...")
+            mnm = build_member_nonmember(campaign, gto)
+
+            member_monthly    = mnm['member_monthly']
+            nonmember_monthly = mnm['nonmember_monthly']
+
+            member_nonmember = {
+                'member_sales': {
+                    'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['member_sales'])}
+                                 for _, r in member_monthly.iterrows()],
+                    'forecast': forecast_monthly(member_monthly, 'member_sales'),
+                },
+                'non_member_sales': {
+                    'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['non_member_sales'])}
+                                 for _, r in nonmember_monthly.iterrows()],
+                    'forecast': forecast_monthly(nonmember_monthly, 'non_member_sales'),
+                },
+            }
+            print(f"  Member Sales months: {len(member_monthly)}")
+            print(f"  Non-Member Sales months: {len(nonmember_monthly)}")
+        else:
+            print("  WARNING: GTO not loaded — skipping member/non-member analysis")
+    else:
+        print("  WARNING: raw_data path not provided — skipping member/non-member analysis")
+
+    # ── Save ─────────────────────────────────────────────────────────────
+    insights = {
+        'time_series':       ts_result,
+        'member_nonmember':  member_nonmember,
+    }
+
+    os.makedirs(combined_folder, exist_ok=True)
+    json_path = os.path.join(combined_folder, 'insights.json')
+    with open(json_path, 'w') as f:
+        json.dump(insights, f, indent=2, default=str)
+    print(f"\n  Saved: {json_path}")
+
+    # ── Excel ─────────────────────────────────────────────────────────────
+    report_path = os.path.join(combined_folder, 'insights_report.xlsx')
+    with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
+        for sheet, records in [
+            ('Monthly_Amount',   ts_result.get('monthly_amount')),
+            ('Month_Regression', ts_result.get('month_dummies_regression', {}).get('coef_table')),
+            ('MoM_Trends',       ts_result.get('mom_trends')),
+            ('Forecast',         ts_result.get('forecast')),
+            ('Anomalies',        ts_result.get('anomalies')),
+            ('Amount_by_Source', ts_result.get('amount_by_source')),
+        ]:
+            if records:
+                pd.DataFrame(records).to_excel(writer, sheet_name=sheet, index=False)
+    print(f"  Saved: {report_path}")
+
+    trend = ts_result.get('trend', {})
+    print(f"\n  Trend: {trend.get('direction','—')} ({trend.get('strength','—')}), "
+          f"R²={trend.get('r_squared','—')}, p={trend.get('p_value','—')}")
+
+    print("\n" + "="*60)
+    print("TIME SERIES COMPLETED")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    if len(sys.argv) >= 3:
+        main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else '')
+    else:
+        import pandas as pd
+        config_file = sys.argv[1] if len(sys.argv) == 2 else "config_Keith.xlsx"
+        script_dir  = Path(__file__).resolve().parent
+        df          = pd.read_excel(script_dir / config_file, sheet_name='paths')
+        cfg         = dict(zip(df['Setting'].astype(str).str.strip(), df['Value'].astype(str).str.strip()))
+        main(cfg.get('cleaned_data',''), cfg.get('combined_data',''), cfg.get('raw_data',''))
