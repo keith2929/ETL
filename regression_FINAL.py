@@ -331,134 +331,18 @@ def to_records(df):
     return json.loads(df.replace([np.inf, -np.inf], np.nan).to_json(orient='records'))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load GTO file
-# ─────────────────────────────────────────────────────────────────────────────
-def load_gto(raw_folder: str) -> pd.DataFrame:
-    import os
-    for f in os.listdir(raw_folder):
-        if f.startswith('~$'):
-            continue
-        if 'gto' in f.lower() and 'lease' in f.lower() and f.endswith('.xlsx'):
-            path = os.path.join(raw_folder, f)
-            df   = pd.read_excel(path, header=7)
-            df.columns = df.columns.str.strip()
-            df = df.dropna(how='all').reset_index(drop=True)
-            df['shop_name']  = df['Shop Name'].astype(str).str.strip().str.lower()
-            df['gto_amount'] = pd.to_numeric(df['GTO Amount ($)'], errors='coerce')
-            df['month_year'] = pd.to_datetime(
-                df['GTO Reporting Month'], errors='coerce'
-            ).dt.strftime('%b-%Y')
-            print(f"  GTO loaded: {len(df):,} rows from {f}")
-            return df[['shop_name', 'month_year', 'gto_amount']].dropna()
-    print("  WARNING: GTO file not found")
-    return pd.DataFrame()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Build Member Sales and Non-Member Sales monthly series
-# ─────────────────────────────────────────────────────────────────────────────
-def build_member_nonmember(campaign: pd.DataFrame, gto: pd.DataFrame) -> dict:
-    """
-    Member Sales   = campaign amount aggregated by outlet × month
-    Non-Member Sales = GTO Amount - Member Sales (outlet × month), clipped at 0
-    Returns monthly totals for both.
-    """
-    campaign = campaign.copy()
-    campaign['outlet_lower'] = campaign['outlet_name'].astype(str).str.strip().str.lower()
-    campaign['amount']       = pd.to_numeric(campaign['amount'], errors='coerce')
-
-    # Member Sales: sum amount by outlet × month
-    member = (campaign.groupby(['outlet_lower', 'month_year'])['amount']
-                      .sum().reset_index()
-                      .rename(columns={'amount': 'member_sales'}))
-
-    # GTO: already shop_name × month_year × gto_amount
-    gto_grp = (gto.groupby(['shop_name', 'month_year'])['gto_amount']
-                   .sum().reset_index())
-
-    # Merge on outlet_lower == shop_name
-    merged = pd.merge(
-        gto_grp, member,
-        left_on=['shop_name', 'month_year'],
-        right_on=['outlet_lower', 'month_year'],
-        how='left'
-    )
-    merged['member_sales']     = merged['member_sales'].fillna(0)
-    merged['non_member_sales'] = (merged['gto_amount'] - merged['member_sales']).clip(lower=0)
-
-    # Monthly totals
-    def monthly_total(df, col):
-        grp = (df.groupby('month_year')[col]
-                .sum().reset_index())
-        grp['sort_key'] = pd.to_datetime(grp['month_year'], format='%b-%Y', errors='coerce')
-        grp = grp[grp['sort_key'].dt.year > 2000]  # remove invalid dates
-        grp = grp.sort_values('sort_key').drop(columns='sort_key')
-        return grp
-
-    member_monthly     = monthly_total(merged, 'member_sales')
-    nonmember_monthly  = monthly_total(merged, 'non_member_sales')
-
-    return {
-        'member_monthly':    member_monthly,
-        'nonmember_monthly': nonmember_monthly,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Simple 24-month forecast for a monthly series
-# ─────────────────────────────────────────────────────────────────────────────
-def forecast_monthly(series_df: pd.DataFrame, value_col: str, n_forecast: int = 24) -> list:
-    from scipy import stats as sp_stats
-    s = series_df.set_index('month_year')[value_col].astype(float)
-    s.index = pd.to_datetime(s.index, format='%b-%Y', errors='coerce')
-    s = s.sort_index().asfreq('MS')
-    forecasts = []
-    last_dt = s.index[-1]
-    try:
-        if len(s) >= 12:
-            mdl = ExponentialSmoothing(s, trend='add', seasonal='add',
-                                       seasonal_periods=12,
-                                       initialization_method='estimated').fit()
-        else:
-            mdl = ExponentialSmoothing(s, trend='add', seasonal=None,
-                                       initialization_method='estimated').fit()
-        pred = mdl.forecast(n_forecast)
-        for i, val in enumerate(pred):
-            fdt = last_dt + pd.DateOffset(months=i+1)
-            forecasts.append({
-                'month_year': fdt.strftime('%b-%Y'),
-                'forecast':   safe_float(val),
-                'type':       'holt_winters'
-            })
-    except Exception as e:
-        print(f"  WARNING: Holt-Winters failed ({e}), using linear extrapolation")
-        s_clean = s.dropna()
-        if len(s_clean) >= 2:
-            x = np.arange(len(s_clean))
-            slope, intercept, *_ = sp_stats.linregress(x, s_clean.values)
-            last_dt = s_clean.index[-1]
-            for i in range(1, n_forecast + 1):
-                fdt = last_dt + pd.DateOffset(months=i)
-                forecasts.append({
-                    'month_year': fdt.strftime('%b-%Y'),
-                    'forecast':   safe_float(intercept + slope * (len(s_clean) + i)),
-                    'type':       'linear_extrapolation'
-                })
-        else:
-            for i in range(1, n_forecast + 1):
-                fdt = last_dt + pd.DateOffset(months=i)
-                forecasts.append({
-                    'month_year': fdt.strftime('%b-%Y'),
-                    'forecast':   None,
-                    'type':       'insufficient_data'
-                })
-    return forecasts
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 def main(cleaned_folder: str, combined_folder: str, raw_folder: str = ''):
+    """
+    GTO loading is now done in data_load_FINAL.py, which writes:
+      gto_member_sales.csv
+      gto_nonmember_sales.csv
+      gto_member_sales_forecast.csv
+      gto_nonmember_sales_forecast.csv
+    into the cleaned_data folder.  This function reads those CSVs directly.
+    The raw_folder argument is accepted for backwards-compatibility but ignored.
+    """
     import os, sys, json
     from pathlib import Path
 
@@ -475,44 +359,45 @@ def main(cleaned_folder: str, combined_folder: str, raw_folder: str = ''):
     campaign['amount'] = pd.to_numeric(campaign.get('amount', pd.Series()), errors='coerce')
     print(f"  Campaign: {len(campaign):,} rows")
 
-    # ── Time Series (existing) ────────────────────────────────────────────
+    # ── Time Series ───────────────────────────────────────────────────────
     ts_result = analyse_time_series(campaign)
 
-    # ── Member / Non-Member Sales ─────────────────────────────────────────
+    # ── Member / Non-Member Sales — read CSVs produced by data_load_FINAL ─
     member_nonmember = {}
-    if raw_folder and os.path.exists(raw_folder):
-        print("\n  Loading GTO file...")
-        gto = load_gto(raw_folder)
-        if not gto.empty:
-            print("  Building Member / Non-Member Sales series...")
-            mnm = build_member_nonmember(campaign, gto)
 
-            member_monthly    = mnm['member_monthly']
-            nonmember_monthly = mnm['nonmember_monthly']
+    ms_path   = os.path.join(cleaned_folder, 'gto_member_sales.csv')
+    nms_path  = os.path.join(cleaned_folder, 'gto_nonmember_sales.csv')
+    msf_path  = os.path.join(cleaned_folder, 'gto_member_sales_forecast.csv')
+    nmsf_path = os.path.join(cleaned_folder, 'gto_nonmember_sales_forecast.csv')
 
-            member_nonmember = {
-                'member_sales': {
-                    'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['member_sales'])}
-                                 for _, r in member_monthly.iterrows()],
-                    'forecast': forecast_monthly(member_monthly, 'member_sales'),
-                },
-                'non_member_sales': {
-                    'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['non_member_sales'])}
-                                 for _, r in nonmember_monthly.iterrows()],
-                    'forecast': forecast_monthly(nonmember_monthly, 'non_member_sales'),
-                },
-            }
-            print(f"  Member Sales months: {len(member_monthly)}")
-            print(f"  Non-Member Sales months: {len(nonmember_monthly)}")
-        else:
-            print("  WARNING: GTO not loaded — skipping member/non-member analysis")
+    if os.path.exists(ms_path) and os.path.exists(nms_path):
+        member_monthly    = pd.read_csv(ms_path)
+        nonmember_monthly = pd.read_csv(nms_path)
+        member_fore       = pd.read_csv(msf_path).to_dict('records')    if os.path.exists(msf_path)  else []
+        nonmember_fore    = pd.read_csv(nmsf_path).to_dict('records')   if os.path.exists(nmsf_path) else []
+
+        member_nonmember = {
+            'member_sales': {
+                'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['member_sales'])}
+                             for _, r in member_monthly.iterrows()],
+                'forecast': member_fore,
+            },
+            'non_member_sales': {
+                'actual':   [{'month_year': r['month_year'], 'value': safe_float(r['non_member_sales'])}
+                             for _, r in nonmember_monthly.iterrows()],
+                'forecast': nonmember_fore,
+            },
+        }
+        print(f"  Member Sales months loaded:     {len(member_monthly)}")
+        print(f"  Non-Member Sales months loaded: {len(nonmember_monthly)}")
     else:
-        print("  WARNING: raw_data path not provided — skipping member/non-member analysis")
+        print("  INFO: gto_member_sales.csv not found — member/non-member section will be empty.")
+        print("        Re-run data_load_FINAL.py with a GTO file present to generate it.")
 
     # ── Save ─────────────────────────────────────────────────────────────
     insights = {
-        'time_series':       ts_result,
-        'member_nonmember':  member_nonmember,
+        'time_series':      ts_result,
+        'member_nonmember': member_nonmember,
     }
 
     os.makedirs(combined_folder, exist_ok=True)
@@ -556,4 +441,4 @@ if __name__ == "__main__":
         script_dir  = Path(__file__).resolve().parent
         df          = pd.read_excel(script_dir / config_file, sheet_name='paths')
         cfg         = dict(zip(df['Setting'].astype(str).str.strip(), df['Value'].astype(str).str.strip()))
-        main(cfg.get('cleaned_data',''), cfg.get('combined_data',''), cfg.get('raw_data',''))
+        main(cfg.get('cleaned_data', ''), cfg.get('combined_data', ''), cfg.get('raw_data', ''))
