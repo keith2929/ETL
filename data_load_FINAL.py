@@ -206,7 +206,7 @@ def load_gto(raw_folder: str) -> pd.DataFrame:
     for f in os.listdir(raw_folder):
         if f.startswith('~$'):
             continue
-        if 'gto' in f.lower() and 'lease' in f.lower() and f.endswith('.xlsx'):
+        if 'gto' in f.lower() and '08' in f.lower() and f.endswith('.xlsx'):
             path = os.path.join(raw_folder, f)
             df   = pd.read_excel(path, header=7)
             df.columns = df.columns.str.strip()
