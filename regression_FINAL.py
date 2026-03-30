@@ -313,6 +313,127 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
         by_source = by_source.sort_values('sort_key').drop(columns='sort_key')
         result['amount_by_source'] = to_records(by_source)
 
+    # ============================================================================
+    # Forecast by campaign source (Mall vs Brand)
+    # ============================================================================
+    if 'campaign_source' in campaign.columns:
+        source_forecasts = {}
+        # Prepare monthly totals per source
+        source_monthly = (campaign.groupby(['month_year', 'campaign_source'])['amount']
+                          .sum().reset_index())
+        source_monthly['sort_key'] = pd.to_datetime(source_monthly['month_year'],
+                                                     format='%b-%Y', errors='coerce')
+        source_monthly = source_monthly.sort_values('sort_key').dropna(subset=['sort_key'])
+
+        for source in ['mall', 'brand']:
+            df_src = source_monthly[source_monthly['campaign_source'] == source].copy()
+            if len(df_src) < MIN_OBS:
+                source_forecasts[source] = {'error': f'Only {len(df_src)} months of data, need \u2265{MIN_OBS}'}
+                continue
+
+            # Create time series
+            series_src = df_src.set_index('sort_key')['amount'].astype(float).asfreq('MS')
+            n_months_src = len(series_src)
+            use_seasonal_src = n_months_src >= 12
+
+            forecasts_src = []
+            if use_seasonal_src:
+                try:
+                    model_src = ExponentialSmoothing(series_src, trend='add', seasonal='add',
+                                                     seasonal_periods=12,
+                                                     initialization_method='estimated').fit()
+                    pred_src = model_src.forecast(forecast_horizon)
+                    resid_src = model_src.resid
+                    sigma_src = np.std(resid_src)
+                    z = stats.norm.ppf(0.975)
+                    lower_src = pred_src - z * sigma_src
+                    upper_src = pred_src + z * sigma_src
+
+                    last_date = series_src.index[-1]
+                    for i in range(forecast_horizon):
+                        fdt = last_date + pd.DateOffset(months=i+1)
+                        forecasts_src.append({
+                            'month_year': fdt.strftime('%b-%Y'),
+                            'forecast': safe_float(pred_src.iloc[i]),
+                            'lower_bound': safe_float(lower_src.iloc[i]),
+                            'upper_bound': safe_float(upper_src.iloc[i]),
+                            'type': 'ets_forecast'
+                        })
+                    source_forecasts[source] = {
+                        'actual': to_records(df_src[['month_year', 'amount']].rename(columns={'amount': 'value'})),
+                        'forecast': forecasts_src,
+                        'model': 'ETS (additive)'
+                    }
+                except Exception as e:
+                    use_seasonal_src = False
+                    source_forecasts[source] = {'error': str(e), 'fallback': 'regression'}
+
+            if not use_seasonal_src:
+                # Fallback: linear trend + month dummies
+                try:
+                    df_src = df_src.copy()
+                    df_src['time'] = np.arange(len(df_src))
+                    df_src['_month_num'] = df_src['sort_key'].dt.month
+                    month_dummies_src = pd.get_dummies(df_src['_month_num'], prefix='month', drop_first=True)
+                    X_train_src = pd.concat([df_src[['time']], month_dummies_src], axis=1)
+                    X_train_src = sm.add_constant(X_train_src)
+                    y_train_src = df_src['amount'].astype(float)
+                    reg_src = sm.OLS(y_train_src, X_train_src).fit()
+
+                    # Future data
+                    future_time_src = np.arange(len(df_src), len(df_src) + forecast_horizon)
+                    last_month_num_src = df_src['_month_num'].iloc[-1]
+                    future_months_src = [(last_month_num_src + i - 1) % 12 + 1 for i in range(forecast_horizon)]
+                    X_future_src = pd.DataFrame(index=range(forecast_horizon))
+                    X_future_src['time'] = future_time_src
+                    for col in month_dummies_src.columns:
+                        month_num = int(col.split('_')[1])
+                        X_future_src[col] = (np.array(future_months_src) == month_num).astype(int)
+                    X_future_src = sm.add_constant(X_future_src)
+
+                    pred_obj_src = reg_src.get_prediction(X_future_src)
+                    pred_mean_src = pred_obj_src.predicted_mean
+                    pred_ci_src = pred_obj_src.conf_int(alpha=0.05)
+
+                    last_date = df_src['sort_key'].iloc[-1]
+                    for i in range(forecast_horizon):
+                        fdt = last_date + pd.DateOffset(months=i+1)
+                        forecasts_src.append({
+                            'month_year': fdt.strftime('%b-%Y'),
+                            'forecast': safe_float(pred_mean_src.iloc[i]),
+                            'lower_bound': safe_float(pred_ci_src.iloc[i, 0]),
+                            'upper_bound': safe_float(pred_ci_src.iloc[i, 1]),
+                            'type': 'regression_trend_seasonal'
+                        })
+                    source_forecasts[source] = {
+                        'actual': to_records(df_src[['month_year', 'amount']].rename(columns={'amount': 'value'})),
+                        'forecast': forecasts_src,
+                        'model': 'Linear trend + month dummies'
+                    }
+                except Exception as e:
+                    # Last resort: linear extrapolation
+                    slope_src, intercept_src, _, _, _ = stats.linregress(
+                        np.arange(len(df_src)), df_src['amount'].values)
+                    last_val_src = df_src['amount'].iloc[-1]
+                    last_date = df_src['sort_key'].iloc[-1]
+                    forecasts_src = []
+                    for i in range(forecast_horizon):
+                        fdt = last_date + pd.DateOffset(months=i+1)
+                        forecasts_src.append({
+                            'month_year': fdt.strftime('%b-%Y'),
+                            'forecast': safe_float(last_val_src + slope_src * (i+1)),
+                            'lower_bound': None,
+                            'upper_bound': None,
+                            'type': 'linear_extrapolation'
+                        })
+                    source_forecasts[source] = {
+                        'actual': to_records(df_src[['month_year', 'amount']].rename(columns={'amount': 'value'})),
+                        'forecast': forecasts_src,
+                        'model': 'Linear extrapolation (fallback)'
+                    }
+
+        result['source_forecasts'] = source_forecasts
+
     return result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -419,6 +540,12 @@ def main(cleaned_folder: str, combined_folder: str, raw_folder: str = ''):
         ]:
             if records:
                 pd.DataFrame(records).to_excel(writer, sheet_name=sheet, index=False)
+        # Source forecast sheets (Mall_Forecast, Brand_Forecast)
+        if 'source_forecasts' in ts_result:
+            for src, data in ts_result['source_forecasts'].items():
+                if 'forecast' in data and data['forecast']:
+                    sheet_name = f'{src.title()}_Forecast'
+                    pd.DataFrame(data['forecast']).to_excel(writer, sheet_name=sheet_name, index=False)
     print(f"  Saved: {report_path}")
 
     trend = ts_result.get('trend', {})

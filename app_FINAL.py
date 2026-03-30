@@ -1121,19 +1121,78 @@ with tab_ts:
 
         st.markdown("---")
 
-        # ── Amount by source ──────────────────────────────────────────────────
-        by_source = ts.get('amount_by_source', [])
-        if by_source:
-            st.markdown("### 🏷️ Spend by Campaign Source (Mall vs Brand)")
-            df_src = pd.DataFrame(by_source)
-            if 'campaign_source' in df_src.columns and 'month_year' in df_src.columns:
-                try:
-                    pivoted = df_src.pivot(
-                        index='month_year', columns='campaign_source', values='amount'
-                    ).fillna(0)
-                    st.bar_chart(pivoted)
-                except Exception:
-                    st.dataframe(df_src, use_container_width=True, hide_index=True)
+        # ── Amount by source (with forecast) ────────────────────────────────
+        st.markdown("### 🏷️ Spend by Campaign Source (Mall vs Brand)")
+        st.caption("Actual (solid) and forecast (dashed) with 95% prediction intervals.")
+
+        source_forecasts = ts.get('source_forecasts', {})
+        if not source_forecasts:
+            # Fallback to old static bar chart if forecasts not available
+            by_source = ts.get('amount_by_source', [])
+            if by_source:
+                df_src = pd.DataFrame(by_source)
+                if 'campaign_source' in df_src.columns and 'month_year' in df_src.columns:
+                    try:
+                        pivoted = df_src.pivot(
+                            index='month_year', columns='campaign_source', values='amount'
+                        ).fillna(0)
+                        st.bar_chart(pivoted)
+                    except Exception:
+                        st.dataframe(df_src, use_container_width=True, hide_index=True)
+            else:
+                st.info("No source breakdown available.")
+        else:
+            fig_src = go.Figure()
+            colors = {'mall': '#ff5c5c', 'brand': '#4af0c4'}
+            pi_colors = {'mall': 'rgba(255,92,92,0.2)', 'brand': 'rgba(74,240,196,0.2)'}
+            for source, data in source_forecasts.items():
+                if 'error' in data and 'actual' not in data:
+                    st.warning(f"{source.title()}: {data['error']}")
+                    continue
+
+                # Actual line
+                actual_df = pd.DataFrame(data.get('actual', []))
+                if not actual_df.empty:
+                    actual_df['month_year'] = pd.to_datetime(actual_df['month_year'], format='%b-%Y')
+                    fig_src.add_trace(go.Scatter(
+                        x=actual_df['month_year'], y=actual_df['value'],
+                        mode='lines+markers', name=f'{source.title()} Actual',
+                        line=dict(color=colors.get(source, '#ffffff'), width=2)
+                    ))
+
+                # Forecast line + prediction interval
+                forecast_df = pd.DataFrame(data.get('forecast', []))
+                if not forecast_df.empty:
+                    forecast_df['month_year'] = pd.to_datetime(forecast_df['month_year'], format='%b-%Y')
+                    fig_src.add_trace(go.Scatter(
+                        x=forecast_df['month_year'], y=forecast_df['forecast'],
+                        mode='lines+markers', name=f'{source.title()} Forecast',
+                        line=dict(color=colors.get(source, '#ffffff'), dash='dash', width=2)
+                    ))
+                    if 'lower_bound' in forecast_df.columns and 'upper_bound' in forecast_df.columns:
+                        ub = forecast_df['upper_bound'].tolist()
+                        lb = forecast_df['lower_bound'].tolist()
+                        x_fill = forecast_df['month_year'].tolist() + forecast_df['month_year'].tolist()[::-1]
+                        y_fill = ub + lb[::-1]
+                        fig_src.add_trace(go.Scatter(
+                            x=x_fill, y=y_fill,
+                            fill='toself',
+                            fillcolor=pi_colors.get(source, 'rgba(255,255,255,0.15)'),
+                            line=dict(color='rgba(0,0,0,0)'),
+                            showlegend=False,
+                            name=f'{source.title()} 95% PI'
+                        ))
+
+            fig_src.update_layout(
+                xaxis_title='Month', yaxis_title='Amount ($)',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                            xanchor='right', x=1, font=dict(color='#e8eaf0', size=12)),
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(22,24,28,1)',
+                font=dict(color='#e8eaf0'),
+                xaxis=dict(gridcolor='#2a2d35'), yaxis=dict(gridcolor='#2a2d35')
+            )
+            st.plotly_chart(fig_src, use_container_width=True)
+            st.caption("🟢 Brand | 🔴 Mall — Dashed lines = forecast, shaded = 95% prediction interval.")
 
         st.markdown("---")
         # ── Member vs Non-Member Sales ────────────────────────────────────
