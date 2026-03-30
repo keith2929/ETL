@@ -649,14 +649,30 @@ with tab_tt:
 
             df_roi_valid = df_roi[df_roi['roi'].notna()].copy()
             if not df_roi_valid.empty:
-                top10_roi = df_roi_valid.head(10).copy()
+                top10_roi = df_roi_valid.sort_values('roi', ascending=False).head(10).copy()
                 st.markdown("**Top 10 Campaigns by ROI**")
-                top10_roi_chart = pd.DataFrame(index=top10_roi['voucher_code'])
-                top10_roi_chart['Mall']  = top10_roi.set_index('voucher_code')['roi'].where(
-                    top10_roi.set_index('voucher_code')['campaign_source'] == 'mall')
-                top10_roi_chart['Brand'] = top10_roi.set_index('voucher_code')['roi'].where(
-                    top10_roi.set_index('voucher_code')['campaign_source'] == 'brand')
-                st.bar_chart(top10_roi_chart, color=['#ff5c5c', '#4af0c4'])
+                _mall_mask  = top10_roi['campaign_source'] == 'mall'
+                _brand_mask = top10_roi['campaign_source'] == 'brand'
+                _fig_roi = go.Figure()
+                if _mall_mask.any():
+                    _m = top10_roi[_mall_mask]
+                    _fig_roi.add_trace(go.Bar(x=_m['voucher_code'], y=_m['roi'], name='Mall',  marker_color='#ff5c5c'))
+                if _brand_mask.any():
+                    _b = top10_roi[_brand_mask]
+                    _fig_roi.add_trace(go.Bar(x=_b['voucher_code'], y=_b['roi'], name='Brand', marker_color='#4af0c4'))
+                _fig_roi.update_layout(
+                    xaxis={'categoryorder': 'array',
+                           'categoryarray': top10_roi['voucher_code'].tolist(),
+                           'tickangle': -45},
+                    yaxis_title='ROI',
+                    barmode='group',
+                    margin=dict(l=10, r=10, t=10, b=100),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    font_color='white',
+                    legend=dict(orientation='h', yanchor='bottom', y=-0.4),
+                )
+                st.plotly_chart(_fig_roi, use_container_width=True)
 
             def _hl_roi(row):
                 r = row.get('roi')
