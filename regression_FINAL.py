@@ -336,14 +336,45 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24, conf
             # Create time series
             series_src = df_src.set_index('sort_key')['amount'].astype(float).asfreq('MS')
             n_months_src = len(series_src)
-            use_seasonal_src = n_months_src >= 12
+            # ETS seasonal needs ≥2 full cycles (24 months) to initialize properly.
+            # For shorter series we go straight to month-dummy regression which is
+            # better-identified and produces visible seasonality with fewer observations.
+            use_seasonal_src = n_months_src >= 2 * SEASONAL_PERIOD
 
             forecasts_src = []
             if use_seasonal_src:
                 try:
-                    model_src = ExponentialSmoothing(series_src, trend='add', seasonal='add',
-                                                     seasonal_periods=12,
-                                                     initialization_method='estimated').fit()
+                    # ── Model selection: try additive & multiplicative seasonality,
+                    #    both with a damped trend to avoid flat linear extrapolation.
+                    #    Pick whichever configuration yields the lower AIC.
+                    best_fitted_src   = None
+                    best_aic_src      = np.inf
+                    best_seasonal_type = 'add'
+
+                    for seasonal_type in ['add', 'mul']:
+                        try:
+                            # Multiplicative seasonality requires an all-positive series
+                            if seasonal_type == 'mul' and (series_src <= 0).any():
+                                continue
+                            candidate = ExponentialSmoothing(
+                                series_src,
+                                trend='add',
+                                damped_trend=True,          # prevents flat linear extrapolation
+                                seasonal=seasonal_type,
+                                seasonal_periods=12,
+                                initialization_method='estimated'
+                            ).fit(optimized=True)
+                            if candidate.aic < best_aic_src:
+                                best_aic_src       = candidate.aic
+                                best_fitted_src    = candidate
+                                best_seasonal_type = seasonal_type
+                        except Exception:
+                            pass
+
+                    if best_fitted_src is None:
+                        raise ValueError("All ETS configurations failed")
+
+                    model_src  = best_fitted_src
                     pred_src   = model_src.forecast(forecast_horizon)
                     resid_src  = model_src.resid
                     fitted_src = model_src.fittedvalues
@@ -374,53 +405,63 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24, conf
                     source_forecasts[source] = {
                         'actual': to_records(df_src[['month_year', 'amount']].rename(columns={'amount': 'value'})),
                         'forecast': forecasts_src,
-                        'model': 'ETS (additive)'
+                        'model': f'ETS (damped trend + {"multiplicative" if best_seasonal_type == "mul" else "additive"} seasonality, AIC={best_aic_src:.1f})'
                     }
                 except Exception as e:
                     use_seasonal_src = False
                     source_forecasts[source] = {'error': str(e), 'fallback': 'regression'}
 
             if not use_seasonal_src:
-                # Fallback: linear trend + month dummies
+                # ── Month-dummy OLS regression ──────────────────────────────────────
+                # y = intercept + beta*t + sum(gamma_m * MonthDummy_m)
+                # Better than ETS for series shorter than 2 full seasonal cycles:
+                # only ~13 params vs 16+ for ETS, so well-identified even at 12–23 months.
                 try:
                     df_src = df_src.copy()
                     df_src['time'] = np.arange(len(df_src))
                     df_src['_month_num'] = df_src['sort_key'].dt.month
-                    month_dummies_src = pd.get_dummies(df_src['_month_num'], prefix='month', drop_first=True)
-                    X_train_src = pd.concat([df_src[['time']], month_dummies_src], axis=1)
-                    X_train_src = sm.add_constant(X_train_src)
+                    # Cast to int to avoid pandas bool-dtype crash in statsmodels
+                    month_dummies_src = pd.get_dummies(
+                        df_src['_month_num'], prefix='month', drop_first=True
+                    ).astype(int)
+                    X_train_src = pd.concat(
+                        [df_src[['time']].astype(float), month_dummies_src], axis=1
+                    )
+                    X_train_src = sm.add_constant(X_train_src, has_constant='add')
                     y_train_src = df_src['amount'].astype(float)
                     reg_src = sm.OLS(y_train_src, X_train_src).fit()
 
-                    # Future data
-                    future_time_src = np.arange(len(df_src), len(df_src) + forecast_horizon)
+                    # Build future X matrix
+                    future_time_src = np.arange(len(df_src), len(df_src) + forecast_horizon, dtype=float)
                     last_month_num_src = df_src['_month_num'].iloc[-1]
-                    future_months_src = [(last_month_num_src + i - 1) % 12 + 1 for i in range(forecast_horizon)]
-                    X_future_src = pd.DataFrame(index=range(forecast_horizon))
-                    X_future_src['time'] = future_time_src
+                    future_months_src = [(last_month_num_src + i - 1) % 12 + 1
+                                         for i in range(1, forecast_horizon + 1)]
+                    X_future_src = pd.DataFrame({'time': future_time_src})
                     for col in month_dummies_src.columns:
                         month_num = int(col.split('_')[1])
                         X_future_src[col] = (np.array(future_months_src) == month_num).astype(int)
-                    X_future_src = sm.add_constant(X_future_src)
+                    X_future_src = sm.add_constant(X_future_src, has_constant='add')
 
-                    pred_obj_src = reg_src.get_prediction(X_future_src)
-                    pred_mean_src = pred_obj_src.predicted_mean
-                    pred_ci_src = pred_obj_src.conf_int(alpha=0.05)
+                    pred_obj_src  = reg_src.get_prediction(X_future_src)
+                    pred_mean_src = np.asarray(pred_obj_src.predicted_mean)
+                    # Use the same confidence level as the rest of the analysis
+                    _ci_raw       = pred_obj_src.conf_int(alpha=1 - confidence_level)
+                    pred_ci_src   = np.asarray(_ci_raw)   # shape (n, 2), works for both ndarray & DataFrame
 
                     last_date = df_src['sort_key'].iloc[-1]
                     for i in range(forecast_horizon):
-                        fdt = last_date + pd.DateOffset(months=i+1)
+                        fdt = last_date + pd.DateOffset(months=i + 1)
                         forecasts_src.append({
-                            'month_year': fdt.strftime('%b-%Y'),
-                            'forecast': safe_float(pred_mean_src.iloc[i]),
-                            'lower_bound': safe_float(pred_ci_src.iloc[i, 0]),
-                            'upper_bound': safe_float(pred_ci_src.iloc[i, 1]),
+                            'month_year':  fdt.strftime('%b-%Y'),
+                            'forecast':    safe_float(pred_mean_src[i]),
+                            'lower_bound': safe_float(pred_ci_src[i, 0]),
+                            'upper_bound': safe_float(pred_ci_src[i, 1]),
                             'type': 'regression_trend_seasonal'
                         })
                     source_forecasts[source] = {
                         'actual': to_records(df_src[['month_year', 'amount']].rename(columns={'amount': 'value'})),
                         'forecast': forecasts_src,
-                        'model': 'Linear trend + month dummies'
+                        'model': f'Month-dummy OLS regression (trend + {len(month_dummies_src.columns)} seasonal dummies)'
                     }
                 except Exception as e:
                     # Last resort: linear extrapolation with prediction interval
