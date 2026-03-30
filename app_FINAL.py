@@ -1137,19 +1137,54 @@ with tab_ts:
             c4.metric("N obs",     mdr.get('n_obs', '—'))
 
             df_coef      = pd.DataFrame(mdr['coef_table'])
-            df_coef_plot = df_coef[df_coef['month'] != 'const'].copy()
+
+            # Convert month_N labels to actual month names
+            import calendar as _cal
+            def _month_label(m):
+                if m == 'const':
+                    return 'January (base)'
+                try:
+                    n = int(str(m).split('_')[1])
+                    return _cal.month_name[n]
+                except Exception:
+                    return m
+            df_coef = df_coef.copy()
+            df_coef['month'] = df_coef['month'].apply(_month_label)
+
+            # Sort descending by coefficient (exclude base const row for plot)
+            df_coef_plot = df_coef[df_coef['month'] != 'January (base)'].copy()
+            df_coef_plot = df_coef_plot.sort_values('coef', ascending=False)
+
+            # Full table sorted descending too
+            df_coef_sorted = df_coef.sort_values('coef', ascending=False)
 
             col_chart, col_table = st.columns([2, 3])
             with col_chart:
                 if not df_coef_plot.empty:
                     st.markdown("**Coefficient by Month**")
-                    st.bar_chart(df_coef_plot.set_index('month')['coef'])
+                    import plotly.graph_objects as _go
+                    _fig = _go.Figure(_go.Bar(
+                        x=df_coef_plot['month'],
+                        y=df_coef_plot['coef'],
+                        marker_color='#3b82f6',
+                    ))
+                    _fig.update_layout(
+                        xaxis={'categoryorder': 'array',
+                               'categoryarray': df_coef_plot['month'].tolist(),
+                               'tickangle': -45},
+                        yaxis_title='Coefficient',
+                        margin=dict(l=10, r=10, t=10, b=80),
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        font_color='white',
+                    )
+                    st.plotly_chart(_fig, use_container_width=True)
             with col_table:
                 def _hl_month(row):
                     return (['background-color:#3d3800; color:#fbbf24'] * len(row)
                             if row.get('significant') else [''] * len(row))
                 st.dataframe(
-                    df_coef[['month', 'coef', 'p_value', 'significant']]
+                    df_coef_sorted[['month', 'coef', 'p_value', 'significant']]
                     .style.apply(_hl_month, axis=1),
                     use_container_width=True, hide_index=True,
                 )
