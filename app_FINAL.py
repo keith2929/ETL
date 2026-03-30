@@ -151,7 +151,8 @@ def get_ts_filtered(cleaned_path: str,
                     filt_source: tuple,
                     filt_outlet: tuple,
                     filt_months: tuple,
-                    filt_campaign: tuple = ()) -> dict:
+                    filt_campaign: tuple = (),
+                    confidence_level: float = 0.80) -> dict:
     try:
         from regression_FINAL import analyse_time_series
     except Exception as e:
@@ -163,7 +164,7 @@ def get_ts_filtered(cleaned_path: str,
     if df.empty:
         return {'error': 'No rows remain after applying the selected filters.'}
     try:
-        return analyse_time_series(df)
+        return analyse_time_series(df, confidence_level=confidence_level)
     except Exception as e:
         return {'error': str(e)}
 
@@ -880,6 +881,29 @@ with tab_ts:
     ts_filters_active = False
     ts_active_parts: list = []
 
+    # ── Prediction interval confidence selector ───────────────────────────────
+    _pi_label_map = {'80%  (recommended — cleaner bands)': 0.80,
+                     '90%': 0.90,
+                     '95%  (widest — most conservative)': 0.95}
+    _pi_label = st.radio(
+        'Prediction interval confidence',
+        list(_pi_label_map.keys()),
+        index=0,
+        horizontal=True,
+        key='ts_pi_level',
+        help=(
+            '80% is standard in retail forecasting and gives readable bands. '
+            '95% is statistically conservative but produces very wide intervals '
+            'on volatile series like mall spend.'
+        ),
+    )
+    _pi_level = _pi_label_map[_pi_label]
+    st.caption(
+        f'ℹ️  z = {__import__("scipy").stats.norm.ppf((1 + _pi_level) / 2):.3f}  —  '
+        f'bands show the range you expect {int(_pi_level*100)}% of future months to fall within.'
+    )
+    st.markdown("<div style='height:.25rem'></div>", unsafe_allow_html=True)
+
     if _data_ready:
         _ts_df = load_campaign_csv(_cleaned_path)
         with st.expander("🔽  Filters", expanded=False):
@@ -911,7 +935,7 @@ with tab_ts:
 
     if ts_filters_active:
         with st.spinner("Running time series on filtered data…"):
-            ts  = get_ts_filtered(_cleaned_path, ts_filt_source, ts_filt_outlet, ts_filt_months, ts_filt_campaign)
+            ts  = get_ts_filtered(_cleaned_path, ts_filt_source, ts_filt_outlet, ts_filt_months, ts_filt_campaign, confidence_level=_pi_level)
         mnm = {}
     else:
         ins = read_ts_json(_combined_path)
@@ -920,6 +944,26 @@ with tab_ts:
             st.stop()
         ts  = ins.get('time_series', {})
         mnm = ins.get('member_nonmember', {})
+        # Re-scale stored PIs if the user picks a different confidence level than
+        # what the pipeline saved (default 0.80). Ratio of z-scores rescales margin.
+        _stored_level = ts.get('confidence_level', 0.80)
+        if abs(_pi_level - _stored_level) > 0.001:
+            import scipy.stats as _sps
+            _z_new   = _sps.norm.ppf((1 + _pi_level)    / 2)
+            _z_old   = _sps.norm.ppf((1 + _stored_level) / 2)
+            _z_ratio = _z_new / _z_old if _z_old else 1.0
+            def _rescale_fp_list(fp_list):
+                for _fp in fp_list:
+                    if _fp.get('lower_bound') is not None and _fp.get('upper_bound') is not None:
+                        _fc   = _fp['forecast']
+                        _half = (_fp['upper_bound'] - _fc) * _z_ratio
+                        _fp['upper_bound'] = round(_fc + _half, 4)
+                        _fp['lower_bound'] = round(max(_fc - _half, 0), 4)
+            # Rescale main overall forecast
+            _rescale_fp_list(ts.get('forecast', []))
+            # Rescale source forecasts (mall / brand)
+            for _src_data in ts.get('source_forecasts', {}).values():
+                _rescale_fp_list(_src_data.get('forecast', []))
 
     if not ts:
         st.info("No time series results yet — run the pipeline first.")
@@ -965,7 +1009,7 @@ with tab_ts:
                         fill='toself',
                         fillcolor='rgba(200,241,53,0.15)',
                         line=dict(color='rgba(255,255,255,0)'),
-                        name='95% Prediction Interval'
+                        name=f'{int(_pi_level*100)}% Prediction Interval'
                     ))
 
             fig.update_layout(
@@ -982,7 +1026,7 @@ with tab_ts:
             )
             st.plotly_chart(fig, use_container_width=True)
             if forecast and 'upper_bound' in pd.DataFrame(forecast).columns:
-                st.caption("Shaded region indicates 95% prediction interval.")
+                st.caption(f"Shaded region indicates {int(_pi_level*100)}% prediction interval.")
 
         trend = ts.get('trend', {})
         if trend:
@@ -1123,7 +1167,7 @@ with tab_ts:
 
         # ── Amount by source (with forecast) ────────────────────────────────
         st.markdown("### 🏷️ Spend by Campaign Source (Mall vs Brand)")
-        st.caption("Actual (solid) and forecast (dashed) with 95% prediction intervals.")
+        st.caption(f"Actual (solid) and forecast (dashed) with {int(_pi_level*100)}% prediction intervals.")
 
         source_forecasts = ts.get('source_forecasts', {})
         if not source_forecasts:
@@ -1173,7 +1217,7 @@ with tab_ts:
                         fillcolor=pi_colors.get(source, 'rgba(255,255,255,0.12)'),
                         line=dict(color='rgba(0,0,0,0)'),
                         showlegend=True,
-                        name=f'{source.title()} 95% PI',
+                        name=f'{source.title()} {int(_pi_level*100)}% PI',
                         legendgroup=source,
                     ))
 
@@ -1214,7 +1258,7 @@ with tab_ts:
                 xaxis=dict(gridcolor='#2a2d35'), yaxis=dict(gridcolor='#2a2d35')
             )
             st.plotly_chart(fig_src, use_container_width=True)
-            st.caption("🟢 Brand | 🔴 Mall — Dashed lines = forecast, shaded = 95% prediction interval.")
+            st.caption(f"🟢 Brand | 🔴 Mall — Dashed lines = forecast, shaded = {int(_pi_level*100)}% prediction interval.")
 
         st.markdown("---")
         # ── Member vs Non-Member Sales ────────────────────────────────────

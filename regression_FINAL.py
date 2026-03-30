@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
 
-def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> dict:
+def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24, confidence_level: float = 0.80) -> dict:
     """
     Enhanced time series analysis on monthly Amount (member spend).
     
@@ -27,6 +27,9 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
     result = {}
     MIN_OBS = 6
     SEASONAL_PERIOD = 12
+
+    # Derive z once from confidence_level so every PI site uses the same value
+    _z_pi = stats.norm.ppf((1 + confidence_level) / 2)
 
     if 'amount' not in campaign.columns or 'month_year' not in campaign.columns:
         return {'error': 'amount or month_year column missing'}
@@ -141,8 +144,7 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
             # Here we use the approach of prediction intervals from the model's residual variance
             residuals = fitted.resid
             sigma = np.std(residuals)  # approximate
-            # Confidence level 95%
-            z = stats.norm.ppf(0.975)
+            z = _z_pi
             lower = pred - z * sigma
             upper = pred + z * sigma
             # Build forecast list
@@ -353,7 +355,7 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
                     sigma_abs   = np.std(resid_src, ddof=1)
                     cv_src      = sigma_abs / mean_fitted if mean_fitted > 0 else 0.15
                     cv_src      = min(cv_src, 0.40)   # cap at 40% so outliers don't explode band
-                    z = stats.norm.ppf(0.975)
+                    z = _z_pi
 
                     last_date = series_src.index[-1]
                     for i in range(forecast_horizon):
@@ -458,6 +460,7 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
                     }
 
         result['source_forecasts'] = source_forecasts
+    result['confidence_level'] = confidence_level
 
     return result
 
