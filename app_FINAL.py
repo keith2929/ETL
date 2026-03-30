@@ -1143,45 +1143,67 @@ with tab_ts:
                 st.info("No source breakdown available.")
         else:
             fig_src = go.Figure()
-            colors = {'mall': '#ff5c5c', 'brand': '#4af0c4'}
-            pi_colors = {'mall': 'rgba(255,92,92,0.2)', 'brand': 'rgba(74,240,196,0.2)'}
+            colors    = {'mall': '#ff5c5c', 'brand': '#4af0c4'}
+            # Keep opacity low (0.12) so the two bands don't swallow each other
+            pi_colors = {'mall': 'rgba(255,92,92,0.12)', 'brand': 'rgba(74,240,196,0.12)'}
+
+            # Draw PI bands FIRST so forecast lines render on top
+            for source, data in source_forecasts.items():
+                if 'error' in data and 'actual' not in data:
+                    continue
+                forecast_df = pd.DataFrame(data.get('forecast', []))
+                if forecast_df.empty:
+                    continue
+                forecast_df['month_year'] = pd.to_datetime(
+                    forecast_df['month_year'], format='%b-%Y')
+                # Only rows where both bounds are present and valid
+                has_bounds = (
+                    'lower_bound' in forecast_df.columns and
+                    'upper_bound' in forecast_df.columns and
+                    forecast_df['lower_bound'].notna().any() and
+                    forecast_df['upper_bound'].notna().any()
+                )
+                if has_bounds:
+                    band = forecast_df.dropna(subset=['lower_bound', 'upper_bound'])
+                    x_fill = band['month_year'].tolist() + band['month_year'].tolist()[::-1]
+                    y_fill = band['upper_bound'].tolist() + band['lower_bound'].tolist()[::-1]
+                    fig_src.add_trace(go.Scatter(
+                        x=x_fill, y=y_fill,
+                        fill='toself',
+                        fillcolor=pi_colors.get(source, 'rgba(255,255,255,0.12)'),
+                        line=dict(color='rgba(0,0,0,0)'),
+                        showlegend=True,
+                        name=f'{source.title()} 95% PI',
+                        legendgroup=source,
+                    ))
+
+            # Draw actual + forecast lines on top of bands
             for source, data in source_forecasts.items():
                 if 'error' in data and 'actual' not in data:
                     st.warning(f"{source.title()}: {data['error']}")
                     continue
 
-                # Actual line
                 actual_df = pd.DataFrame(data.get('actual', []))
                 if not actual_df.empty:
-                    actual_df['month_year'] = pd.to_datetime(actual_df['month_year'], format='%b-%Y')
+                    actual_df['month_year'] = pd.to_datetime(
+                        actual_df['month_year'], format='%b-%Y')
                     fig_src.add_trace(go.Scatter(
                         x=actual_df['month_year'], y=actual_df['value'],
                         mode='lines+markers', name=f'{source.title()} Actual',
-                        line=dict(color=colors.get(source, '#ffffff'), width=2)
+                        line=dict(color=colors.get(source, '#ffffff'), width=2),
+                        legendgroup=source,
                     ))
 
-                # Forecast line + prediction interval
                 forecast_df = pd.DataFrame(data.get('forecast', []))
                 if not forecast_df.empty:
-                    forecast_df['month_year'] = pd.to_datetime(forecast_df['month_year'], format='%b-%Y')
+                    forecast_df['month_year'] = pd.to_datetime(
+                        forecast_df['month_year'], format='%b-%Y')
                     fig_src.add_trace(go.Scatter(
                         x=forecast_df['month_year'], y=forecast_df['forecast'],
                         mode='lines+markers', name=f'{source.title()} Forecast',
-                        line=dict(color=colors.get(source, '#ffffff'), dash='dash', width=2)
+                        line=dict(color=colors.get(source, '#ffffff'), dash='dash', width=2),
+                        legendgroup=source,
                     ))
-                    if 'lower_bound' in forecast_df.columns and 'upper_bound' in forecast_df.columns:
-                        ub = forecast_df['upper_bound'].tolist()
-                        lb = forecast_df['lower_bound'].tolist()
-                        x_fill = forecast_df['month_year'].tolist() + forecast_df['month_year'].tolist()[::-1]
-                        y_fill = ub + lb[::-1]
-                        fig_src.add_trace(go.Scatter(
-                            x=x_fill, y=y_fill,
-                            fill='toself',
-                            fillcolor=pi_colors.get(source, 'rgba(255,255,255,0.15)'),
-                            line=dict(color='rgba(0,0,0,0)'),
-                            showlegend=False,
-                            name=f'{source.title()} 95% PI'
-                        ))
 
             fig_src.update_layout(
                 xaxis_title='Month', yaxis_title='Amount ($)',

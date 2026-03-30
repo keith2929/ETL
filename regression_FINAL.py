@@ -342,21 +342,31 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
                     model_src = ExponentialSmoothing(series_src, trend='add', seasonal='add',
                                                      seasonal_periods=12,
                                                      initialization_method='estimated').fit()
-                    pred_src = model_src.forecast(forecast_horizon)
-                    resid_src = model_src.resid
-                    sigma_src = np.std(resid_src)
+                    pred_src   = model_src.forecast(forecast_horizon)
+                    resid_src  = model_src.resid
+                    fitted_src = model_src.fittedvalues
+
+                    # CV-based sigma: std(resid) / mean(|fitted|)
+                    # Keeps the band proportional to forecast magnitude regardless of
+                    # the raw $ scale of the series (avoids massive bands on high-value sources).
+                    mean_fitted = np.abs(fitted_src).mean()
+                    sigma_abs   = np.std(resid_src, ddof=1)
+                    cv_src      = sigma_abs / mean_fitted if mean_fitted > 0 else 0.15
+                    cv_src      = min(cv_src, 0.40)   # cap at 40% so outliers don't explode band
                     z = stats.norm.ppf(0.975)
-                    lower_src = pred_src - z * sigma_src
-                    upper_src = pred_src + z * sigma_src
 
                     last_date = series_src.index[-1]
                     for i in range(forecast_horizon):
-                        fdt = last_date + pd.DateOffset(months=i+1)
+                        fdt    = last_date + pd.DateOffset(months=i + 1)
+                        h      = i + 1
+                        y_pred = pred_src.iloc[i]
+                        # Proportional margin fanning out with horizon
+                        margin = z * cv_src * abs(y_pred) * np.sqrt(h)
                         forecasts_src.append({
-                            'month_year': fdt.strftime('%b-%Y'),
-                            'forecast': safe_float(pred_src.iloc[i]),
-                            'lower_bound': safe_float(lower_src.iloc[i]),
-                            'upper_bound': safe_float(upper_src.iloc[i]),
+                            'month_year':  fdt.strftime('%b-%Y'),
+                            'forecast':    safe_float(y_pred),
+                            'lower_bound': safe_float(max(y_pred - margin, 0)),
+                            'upper_bound': safe_float(y_pred + margin),
                             'type': 'ets_forecast'
                         })
                     source_forecasts[source] = {
@@ -411,19 +421,34 @@ def analyse_time_series(campaign: pd.DataFrame, forecast_horizon: int = 24) -> d
                         'model': 'Linear trend + month dummies'
                     }
                 except Exception as e:
-                    # Last resort: linear extrapolation
-                    slope_src, intercept_src, _, _, _ = stats.linregress(
-                        np.arange(len(df_src)), df_src['amount'].values)
+                    # Last resort: linear extrapolation with prediction interval
+                    # PI formula: ŷ ± t * s * sqrt(1 + 1/n + (x_new - x̄)² / Σ(xᵢ - x̄)²)
+                    x_train = np.arange(len(df_src), dtype=float)
+                    y_train = df_src['amount'].values.astype(float)
+                    slope_src, intercept_src, _, _, _ = stats.linregress(x_train, y_train)
+                    y_fitted = intercept_src + slope_src * x_train
+                    n_src = len(x_train)
+                    # Residual standard error (df = n - 2 for simple linear regression)
+                    rse_src = np.sqrt(np.sum((y_train - y_fitted) ** 2) / max(n_src - 2, 1))
+                    x_mean_src = x_train.mean()
+                    ss_xx_src  = np.sum((x_train - x_mean_src) ** 2) or 1.0
+                    # t critical value at 95% (two-tailed), df = n-2; fall back to z if too few
+                    t_crit_src = stats.t.ppf(0.975, df=max(n_src - 2, 1))
                     last_val_src = df_src['amount'].iloc[-1]
                     last_date = df_src['sort_key'].iloc[-1]
                     forecasts_src = []
                     for i in range(forecast_horizon):
                         fdt = last_date + pd.DateOffset(months=i+1)
+                        x_new  = n_src + i       # next time index beyond training
+                        y_pred = intercept_src + slope_src * x_new
+                        # Prediction SE grows with distance from training data
+                        se_pred = rse_src * np.sqrt(1 + 1/n_src + (x_new - x_mean_src)**2 / ss_xx_src)
+                        margin  = t_crit_src * se_pred
                         forecasts_src.append({
-                            'month_year': fdt.strftime('%b-%Y'),
-                            'forecast': safe_float(last_val_src + slope_src * (i+1)),
-                            'lower_bound': None,
-                            'upper_bound': None,
+                            'month_year':  fdt.strftime('%b-%Y'),
+                            'forecast':    safe_float(y_pred),
+                            'lower_bound': safe_float(y_pred - margin),
+                            'upper_bound': safe_float(y_pred + margin),
                             'type': 'linear_extrapolation'
                         })
                     source_forecasts[source] = {
