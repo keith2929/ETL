@@ -1,9 +1,11 @@
 @echo off
-cd /d "%~dp0"
+setlocal enabledelayedexpansion
+
+set "BASE=%~dp0"
 title ION Orchard Loyalty Pipeline
 
-:: ── Check setup has been run ──────────────────────────────────
-if not exist "venv\Scripts\python.exe" (
+:: ── Check venv exists ─────────────────────────────────────────
+if not exist "%BASE%venv\Scripts\python.exe" (
     echo ============================================================
     echo   Setup not complete.
     echo   Please double-click setup_windows.bat first.
@@ -12,21 +14,40 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 
+:: ── Check app exists — flat structure, no app\ subfolder ──────
+if not exist "%BASE%app_FINAL.py" (
+    echo ============================================================
+    echo   ERROR: app_FINAL.py not found in:
+    echo   %BASE%
+    echo.
+    echo   Files found:
+    dir "%BASE%" /b
+    echo ============================================================
+    pause
+    exit /b 1
+)
+
 echo ============================================================
 echo   ION ORCHARD LOYALTY PIPELINE
-echo   Starting — browser opens in ~10 seconds
+echo   Starting - browser opens in ~10 seconds
 echo   Keep this window open while using the app
-echo   If browser doesn't open: http://localhost:8501
+echo   If browser does not open: http://localhost:8501
 echo ============================================================
 echo.
 
-cd app
-..\venv\Scripts\python.exe -m streamlit run app_FINAL.py ^
+:: ── Launch — all files in BASE, no cd needed ──────────────────
+"%BASE%venv\Scripts\python.exe" -m streamlit run "%BASE%app_FINAL.py" ^
     --server.headless false ^
     --browser.gatherUsageStats false ^
     --server.port 8501 ^
     --theme.base dark
 
+set "ERR=%ERRORLEVEL%"
 echo.
-echo App stopped. Screenshot this if there's an error.
+if %ERR% NEQ 0 (
+    echo ============================================================
+    echo   App stopped. Error code: %ERR%
+    echo   Screenshot this and send to your contact.
+    echo ============================================================
+)
 pause

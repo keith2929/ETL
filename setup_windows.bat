@@ -1,15 +1,17 @@
 @echo off
-cd /d "%~dp0"
+setlocal enabledelayedexpansion
+
+set "BASE=%~dp0"
+
 title ION Pipeline Setup
 
 echo ============================================================
 echo   ION ORCHARD PIPELINE - WINDOWS SETUP
-echo   Run this once after downloading.
 echo ============================================================
 echo.
 
 :: ── Find Python ───────────────────────────────────────────────
-set PYTHON=
+set "PYTHON="
 for %%P in (
     "%USERPROFILE%\anaconda3\python.exe"
     "%USERPROFILE%\miniconda3\python.exe"
@@ -19,45 +21,39 @@ for %%P in (
     "C:\anaconda3\python.exe"
 ) do (
     if not defined PYTHON (
-        if exist %%P set PYTHON=%%P
+        if exist %%P set "PYTHON=%%P"
     )
 )
 
-:: Fallback to PATH python
 if not defined PYTHON (
     where python >nul 2>&1
-    if %ERRORLEVEL% == 0 set PYTHON=python
+    if %ERRORLEVEL% == 0 set "PYTHON=python"
 )
 
 if not defined PYTHON (
-    echo ❌ Python not found.
-    echo.
-    echo Please install Python from:
-    echo https://www.python.org/downloads/
-    echo.
-    echo IMPORTANT: Check "Add Python to PATH" during install.
-    echo Then double-click this file again.
-    echo.
+    echo Python not found.
+    echo Please install from https://www.python.org/downloads/
+    echo Check "Add Python to PATH" during install.
     start https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
-echo ✅ Found Python: %PYTHON%
+echo Found Python: %PYTHON%
 echo.
 
 :: ── Create virtual environment ────────────────────────────────
 echo Step 1/3: Creating virtual environment...
 
-if exist "venv" (
+if exist "%BASE%venv" (
     echo    Removing old venv...
-    rmdir /s /q venv
+    rmdir /s /q "%BASE%venv"
 )
 
-%PYTHON% -m venv venv
+"%PYTHON%" -m venv "%BASE%venv"
 
-if not exist "venv\Scripts\python.exe" (
-    echo ❌ Failed to create virtual environment.
+if not exist "%BASE%venv\Scripts\python.exe" (
+    echo Failed to create virtual environment.
     pause
     exit /b 1
 )
@@ -65,58 +61,93 @@ if not exist "venv\Scripts\python.exe" (
 echo    Done.
 echo.
 
-:: ── Install packages ──────────────────────────────────────────
-echo Step 2/3: Installing packages from requirements.txt...
+:: ── Install packages directly — skip pip upgrade ──────────────
+echo Step 2/3: Installing packages...
 echo    This takes 3-5 minutes. Please wait.
 echo.
 
-venv\Scripts\pip install --upgrade pip --quiet
+:: Use python -m pip with fully quoted paths
+:: --no-warn-script-location suppresses the OneDrive path warnings
+:: --disable-pip-version-check stops the upgrade notice entirely
 
-venv\Scripts\pip install -r requirements.txt --quiet --no-warn-script-location
+"%BASE%venv\Scripts\python.exe" -m pip install ^
+    streamlit pandas openpyxl statsmodels scipy scikit-learn plotly ^
+    --quiet ^
+    --no-warn-script-location ^
+    --disable-pip-version-check
 
 if %ERRORLEVEL% NEQ 0 (
-    echo ❌ Package installation failed.
-    echo    Check your internet connection and try again.
-    pause
-    exit /b 1
+    echo.
+    echo Package installation failed.
+    echo Trying one package at a time...
+    echo.
+
+    for %%P in (streamlit pandas openpyxl statsmodels scipy scikit-learn plotly) do (
+        echo    Installing %%P...
+        "%BASE%venv\Scripts\python.exe" -m pip install %%P ^
+            --quiet ^
+            --no-warn-script-location ^
+            --disable-pip-version-check
+        if %ERRORLEVEL% NEQ 0 (
+            echo    WARNING: %%P failed - continuing anyway
+        ) else (
+            echo    %%P OK
+        )
+    )
 )
 
 echo    Done.
 echo.
 
-:: ── Verify ────────────────────────────────────────────────────
+:: ── Verify each package ───────────────────────────────────────
 echo Step 3/3: Verifying installation...
+echo.
 
-venv\Scripts\python -c "
-import streamlit, pandas, statsmodels, sklearn, plotly, openpyxl
-print('   streamlit   ', streamlit.__version__, ' OK')
-print('   pandas      ', pandas.__version__,    ' OK')
-print('   statsmodels ', statsmodels.__version__,' OK')
-print('   scikit-learn', sklearn.__version__,    ' OK')
-print('   plotly      ', plotly.__version__,     ' OK')
-"
+set "ALLOK=1"
 
-if %ERRORLEVEL% NEQ 0 (
-    echo ❌ Verification failed. Please run setup again.
+"%BASE%venv\Scripts\python.exe" -c "import streamlit; print('   streamlit    ' + streamlit.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    streamlit     MISSING & set "ALLOK=0")
+
+"%BASE%venv\Scripts\python.exe" -c "import pandas; print('   pandas        ' + pandas.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    pandas        MISSING & set "ALLOK=0")
+
+"%BASE%venv\Scripts\python.exe" -c "import statsmodels; print('   statsmodels   ' + statsmodels.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    statsmodels   MISSING & set "ALLOK=0")
+
+"%BASE%venv\Scripts\python.exe" -c "import sklearn; print('   scikit-learn  ' + sklearn.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    scikit-learn  MISSING & set "ALLOK=0")
+
+"%BASE%venv\Scripts\python.exe" -c "import plotly; print('   plotly         ' + plotly.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    plotly        MISSING & set "ALLOK=0")
+
+"%BASE%venv\Scripts\python.exe" -c "import openpyxl; print('   openpyxl      ' + openpyxl.__version__ + '  OK')"
+if %ERRORLEVEL% NEQ 0 (echo    openpyxl      MISSING & set "ALLOK=0")
+
+echo.
+
+if "%ALLOK%"=="0" (
+    echo ============================================================
+    echo   WARNING: Some packages failed to install.
+    echo   Try running setup_windows.bat again.
+    echo   If it keeps failing, contact your support person.
+    echo ============================================================
     pause
     exit /b 1
 )
 
-:: ── Set up config ─────────────────────────────────────────────
-if not exist "config_ION.xlsx" (
-    if exist "config_template.xlsx" (
-        copy config_template.xlsx config_ION.xlsx >nul
+:: ── Copy config template ──────────────────────────────────────
+if not exist "%BASE%config_ION.xlsx" (
+    if exist "%BASE%config_template.xlsx" (
+        copy "%BASE%config_template.xlsx" "%BASE%config_ION.xlsx" >nul
+        echo Created config_ION.xlsx
+        echo Open it and fill in your folder paths.
         echo.
-        echo ✅ Created config_ION.xlsx from template.
-        echo    Open it and fill in your folder paths.
     )
 )
 
-echo.
 echo ============================================================
-echo   ✅ SETUP COMPLETE
+echo   SETUP COMPLETE
 echo.
-echo   From now on just double-click RUN_APP.bat
+echo   Next step: Double-click RUN_APP.bat
 echo ============================================================
-echo.
 pause
