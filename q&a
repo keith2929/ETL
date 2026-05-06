@@ -1,0 +1,216 @@
+---
+Q&A
+
+---
+
+## Variables — What You Used and Why
+
+### Dependent Variables (Y)
+
+**Q: Why is your Y variable `amount` (transaction spend) and not points earned or redemption count?**
+
+A: Amount is the most direct measure of business value — it's what ION actually cares about in revenue terms. Points earned is a downstream derivative of amount (spend X points per dollar), so using it as Y would create a circular relationship. Redemption count is a frequency measure, not a value measure — a member redeeming ten $5 vouchers looks better than one $200 transaction, which is misleading. Amount captures both frequency and value in one number.
+
+---
+
+**Q: Why do you use per-receipt amount rather than total monthly spend per member?**
+
+A: Two reasons. First, we don't have a clean member ID that persists reliably across all transactions in this dataset — outlet name and voucher code are more reliable identifiers. Second, per-receipt amount isolates the basket size effect of each campaign, which is the direct question: does this voucher make people spend more per visit? Monthly aggregation would blur that signal with visit frequency effects.
+
+---
+
+### Independent Variables (X)
+
+**Q: Why voucher code dummies instead of continuous variables like voucher value?**
+
+A: Voucher codes are categorical by nature — a `MIN300` campaign is fundamentally different from a `BRAND_CNY` campaign in terms of who it targets, when it runs, and what behaviour it incentivises. Treating voucher value as continuous would assume a linear dose-response relationship (more voucher value = proportionally more spend), which isn't supported by loyalty programme literature. Each campaign has its own identity and the dummy approach lets us estimate that identity directly.
+
+---
+
+**Q: Why drop-first on the dummies? Which voucher code is the base?**
+
+A: Drop-first avoids perfect multicollinearity — the dummy trap. The base category is automatically the most frequent voucher code after alphabetical sorting, which pandas `get_dummies(drop_first=True)` handles. Every other coefficient is interpreted as the spend difference relative to that base campaign. If they press you on which specific one:
+
+```python
+# Add this to linear_regression_FINAL.py to print the base
+top_codes = df['voucher_code'].value_counts().head(MAX_DUMMIES).index.tolist()
+print(f"Base category (dropped): {top_codes[0]}")
+```
+
+---
+
+**Q: Why cap at 67 voucher code dummies (`MAX_DUMMIES = 67`)?**
+
+A: Degrees of freedom constraint. OLS needs more observations than parameters — if you have 500 receipts and 200 voucher codes, your model is underidentified and coefficients become unreliable. 67 was chosen to keep the model well-identified given the dataset size. Lasso in `linear_regression_FINAL.py` handles this differently by shrinking irrelevant coefficients to zero automatically, which is why both approaches are included.
+
+---
+
+**Q: Why is `is_brand` included but then dropped in the final features list?**
+
+```python
+# In linear_regression_FINAL.py — this is intentional
+features = camp_cols  # is_brand is excluded here
+```
+
+A: Good catch. `is_brand` is collinear with the voucher code dummies — every brand voucher code is by definition brand-funded, so the dummies already encode that information. Including both would cause redundancy. The campaign source comparison is done separately in the T-Test tab (one-sample t-test by source) and the Time Series tab (source-level forecasts), where it's more interpretable than a single suppressed coefficient in a regression.
+
+---
+
+## Method Choices
+
+### Linear Regression (OLS)
+
+**Q: Why OLS? Your data might not meet the Gauss-Markov assumptions.**
+
+A: OLS is the right starting point because it's interpretable and gives us coefficients with clear business meaning — "this campaign is associated with $X more per receipt than the base campaign." We check assumptions explicitly:
+
+```python
+# Assumptions checked in the code:
+
+# 1. Linearity — checked via residual plot (Fitted vs Residuals in app)
+#    Look for: random scatter around zero, no curve pattern
+
+# 2. Homoscedasticity — same residual plot
+#    Look for: no funnel shape (wider residuals at higher fitted values)
+
+# 3. No multicollinearity — VIF table in Regression tab
+#    Rule: VIF < 5 is fine, > 10 is a problem
+
+# 4. Normality of residuals — histogram in Regression tab
+#    Rule: roughly bell-shaped; with n > 30 CLT makes OLS robust anyway
+
+# 5. Independence — Durbin-Watson statistic shown under model fit
+#    Rule: 1.5 < DW < 2.5 means no autocorrelation
+```
+
+If they see heteroscedasticity in the plot, the honest answer is: "We'd use robust standard errors (HC3) in the next iteration — the coefficients are still unbiased, just the standard errors need correction."
+
+---
+
+**Q: Why not use a mixed-effects model given you have repeated observations per outlet?**
+
+A: Valid point — a mixed-effects model with outlet as a random effect would account for outlet-level clustering. We chose OLS for two reasons: interpretability for a business audience, and the fact that outlet identity is partially captured by the voucher code dummies (brand campaigns tend to map to specific outlets). A mixed-effects extension would be the right next step if ION wants to isolate outlet-level effects from campaign effects.
+
+---
+
+**Q: Why standardise the features?**
+
+```python
+scaler = StandardScaler()
+X_scaled = pd.DataFrame(scaler.fit_transform(X_raw), columns=features, index=X_raw.index)
+```
+
+A: Standardising puts all coefficients on the same scale (standard deviations), making them directly comparable in magnitude. Without it, a dummy variable (0/1) and a continuous variable like NLA square footage would have coefficients on completely different scales and you couldn't say which predictor has a larger effect. With standardised features, the coefficient size tells you relative importance directly.
+
+---
+
+### T-Tests
+
+**Q: Why one-sample t-test and not two-sample (brand vs mall)?**
+
+A: We run one-sample first because the primary question is "does this campaign perform differently from the average?" not just "is brand better than mall overall?" One-sample gives per-campaign insight — you can see exactly which campaigns are pulling above or below, regardless of funding type. We then compare brand vs mall at the aggregate level in the Time Series source forecasts. A two-sample t-test comparing brand vs mall as groups is a natural extension — want me to add it?
+
+---
+
+**Q: Your Shapiro-Wilk is only run for n ≤ 30. Why not always run it?**
+
+A: Shapiro-Wilk loses power for large samples — with n > 5000 it will reject normality for trivially small deviations that have no practical impact on t-test validity. More importantly, by the Central Limit Theorem, the sampling distribution of the mean is approximately normal for n > 30 regardless of the underlying distribution. So the t-test is valid for large n even without normality of the raw data. Running Shapiro on large n would generate misleading "not normal" flags.
+
+---
+
+**Q: You're running multiple t-tests — one per campaign. Isn't that a multiple comparisons problem?**
+
+A: Yes, and it's a known limitation. With 67 campaigns at α=0.05, we'd expect roughly 3-4 false positives by chance alone. The correct fix is a Bonferroni correction or Benjamini-Hochberg FDR adjustment. In the current version we flag this in the "Most Reliable Results" section by requiring both significance AND normality, which partially mitigates it. Adding a corrected p-value column is straightforward:
+
+```python
+# Add this to ttest_FINAL.py — Bonferroni correction
+from statsmodels.stats.multitest import multipletests
+
+pvals = [r['p_value'] for r in results if r.get('p_value') is not None]
+reject, pvals_corrected, _, _ = multipletests(pvals, alpha=0.05, method='bonferroni')
+
+# Zip corrected p-values back into results
+i = 0
+for r in results:
+    if r.get('p_value') is not None:
+        r['p_value_bonferroni'] = round(pvals_corrected[i], 4)
+        r['significant_bonferroni'] = bool(reject[i])
+        i += 1
+```
+
+---
+
+### Time Series
+
+**Q: Why Holt-Winters (ETS) and not ARIMA?**
+
+A: Both are valid for monthly retail data. We chose Holt-Winters for three reasons:
+
+1. **Interpretability** — the three components (level, trend, seasonal) map directly to concepts ION already uses in planning
+2. **Robustness with short series** — ARIMA needs careful order selection (p,d,q) which becomes unreliable with fewer than 36 months of data; ETS degrades more gracefully
+3. **Automatic parameter estimation** — ETS fits smoothing parameters by MLE, so it's less sensitive to analyst choices than ARIMA order selection
+
+If they have 3+ years of data going forward, ARIMA or Prophet would be worth adding.
+
+---
+
+**Q: Why STL decomposition instead of classical additive decomposition?**
+
+```python
+stl = STL(series, period=SEASONAL_PERIOD, robust=True).fit()
+```
+
+A: STL (Seasonal-Trend decomposition using Loess) has two advantages over classical decomposition. First, `robust=True` uses iteratively reweighted least squares which downweights outlier months — important for retail data with anomalous months like COVID periods. Second, STL allows the seasonal component to change slowly over time, whereas classical decomposition assumes a fixed seasonal pattern. For a mall that's introducing new campaigns each year, a time-varying seasonal component is more realistic.
+
+---
+
+**Q: Your prediction intervals use a fixed sigma from residuals — isn't that too simple?**
+
+```python
+sigma = np.std(residuals)
+lower = pred - z * sigma
+upper = pred + z * sigma
+```
+
+A: Yes, this is a simplification. A proper prediction interval should fan out with horizon — uncertainty compounds over time. We handle this in the source-level forecasts:
+
+```python
+# In regression_FINAL.py — source forecasts use horizon-aware intervals
+margin = z * cv_src * abs(y_pred) * np.sqrt(h)  # h = horizon step
+```
+
+The overall forecast uses the simpler fixed sigma as a conservative baseline. If they want the proper fanning intervals on the overall forecast too, that's a one-line change — replace `sigma` with `sigma * np.sqrt(h)`.
+
+---
+
+**Q: Why 80% prediction intervals as default, not 95%?**
+
+A: 95% intervals in retail forecasting are often so wide they're not actionable — especially on volatile monthly spend data. 80% is the standard in demand forecasting (used by Amazon, Walmart, most retail operations) because it gives meaningful bounds while still being tight enough to plan inventory and budgets around. We expose the choice in the UI so ION can switch to 90% or 95% if they prefer a more conservative planning assumption.
+
+---
+
+### ROI Calculation
+
+**Q: Your ROI is `avg_revenue / voucher_value` — that's not true incremental ROI.**
+
+A: Correct, and important to acknowledge. This is a simple revenue-to-cost ratio, not incremental lift. True incremental ROI would require a control group of similar members who didn't receive the voucher. With the current data (all redeemers, no control), we can't isolate the counterfactual — would they have spent the same amount without the voucher? The ratio we compute answers "does the member spend more than the voucher costs?" which is a necessary but not sufficient condition for positive ROI. A test-and-control campaign design would be the right next step.
+
+---
+
+## Model Evaluation Questions
+
+**Q: Your R² values are low — does the model even work?**
+
+A: Low R² in cross-sectional transaction data is completely normal and expected. R² tells you what fraction of variance in spend is explained by campaign identity alone. Individual transaction amounts have enormous natural variation — two people using the same voucher might spend $50 or $500 depending on what they're buying that day. What matters for our purposes is whether the campaign coefficients are statistically significant and in the right direction, not whether R² is high. A significant coefficient at low R² still tells you the campaign effect is real.
+
+---
+
+**Q: Why cross-validation with only 3 folds?**
+
+```python
+n_splits = min(3, len(subset))
+```
+
+A: This is a floor set because some filtered subsets have very few rows. Standard 5-fold CV needs at least 5 observations per fold to be meaningful. On the full dataset we use 5-fold by default. The `min(3, len(subset))` is a safety net for edge cases — if a campaign has only 8 receipts, 3-fold gives you 2-3 test observations per fold which is the minimum reasonable. We surface the CV R² in the summary table so you can see when it's based on a small sample.
+
+---
