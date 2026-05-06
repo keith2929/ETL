@@ -1,64 +1,32 @@
 @echo off
 cd /d "%~dp0"
-echo ============================================================
-echo   CAPSTONE PIPELINE APP
-echo ============================================================
-echo.
+title ION Orchard Loyalty Pipeline
 
-:: Try to find Python in common Anaconda/Miniconda locations
-set PYTHON_EXE=
-set PIP_EXE=
-set STREAMLIT_EXE=
-
-:: Check common install locations
-for %%P in (
-    "%USERPROFILE%\anaconda3\python.exe"
-    "%USERPROFILE%\Anaconda3\python.exe"
-    "%USERPROFILE%\miniconda3\python.exe"
-    "%USERPROFILE%\Miniconda3\python.exe"
-    "%LOCALAPPDATA%\anaconda3\python.exe"
-    "%LOCALAPPDATA%\Anaconda3\python.exe"
-    "%LOCALAPPDATA%\miniconda3\python.exe"
-    "C:\anaconda3\python.exe"
-    "C:\Anaconda3\python.exe"
-    "C:\ProgramData\anaconda3\python.exe"
-    "C:\ProgramData\Anaconda3\python.exe"
-) do (
-    if exist %%P (
-        set PYTHON_EXE=%%P
-        goto :found_python
-    )
-)
-
-:: Fall back to whatever python is in PATH
-where python >nul 2>&1
-if %ERRORLEVEL% == 0 (
-    set PYTHON_EXE=python
-    goto :found_python
-)
-
-echo Python not found. Please install Anaconda from https://www.anaconda.com
-echo or Python from https://www.python.org (check "Add to PATH" during install).
-pause
-exit /b 1
-
-:found_python
-echo Found Python: %PYTHON_EXE%
-echo.
-
-:: Install streamlit if needed
-echo Checking dependencies...
-%PYTHON_EXE% -m pip install streamlit pandas openpyxl --quiet
-if %ERRORLEVEL% NEQ 0 (
-    echo Failed to install dependencies. Check your internet connection.
+:: ── Check setup has been run ──────────────────────────────────
+if not exist "venv\Scripts\python.exe" (
+    echo ============================================================
+    echo   Setup not complete.
+    echo   Please double-click setup_windows.bat first.
+    echo ============================================================
     pause
     exit /b 1
 )
 
+echo ============================================================
+echo   ION ORCHARD LOYALTY PIPELINE
+echo   Starting — browser opens in ~10 seconds
+echo   Keep this window open while using the app
+echo   If browser doesn't open: http://localhost:8501
+echo ============================================================
 echo.
-echo Launching app — your browser will open automatically...
-echo (Close this window to stop the app)
-echo.
-%PYTHON_EXE% -m streamlit run app_FINAL.py --server.headless false
 
+cd app
+..\venv\Scripts\python.exe -m streamlit run app_FINAL.py ^
+    --server.headless false ^
+    --browser.gatherUsageStats false ^
+    --server.port 8501 ^
+    --theme.base dark
+
+echo.
+echo App stopped. Screenshot this if there's an error.
 pause
